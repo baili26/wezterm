@@ -188,4 +188,26 @@ mod test {
             );
         }
     }
+
+    #[test]
+    fn default_rules_survive_a_lua_round_trip() {
+        // `wezterm.default_keyword_rules()` converts the list to Lua and the
+        // user assigns it back to `config.keyword_rules`; make sure that path
+        // preserves names, patterns and colors.
+        let rules = crate::config::default_keyword_rules();
+        let lua = crate::lua::make_lua_context(std::path::Path::new("testing")).unwrap();
+        let value = luahelper::to_lua(&lua, rules.clone()).unwrap();
+        let round_tripped: Vec<KeywordRule> = luahelper::from_lua(value).unwrap();
+
+        assert_eq!(round_tripped.len(), rules.len());
+        for (a, b) in rules.iter().zip(round_tripped.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.regex.as_str(), b.regex.as_str());
+            assert_eq!(a.fg, b.fg);
+            assert_eq!(a.bg, b.bg);
+            assert_eq!(a.bold, b.bold);
+            assert_eq!(a.italic, b.italic);
+            assert_eq!(a.underline, b.underline);
+        }
+    }
 }

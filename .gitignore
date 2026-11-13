@@ -66,3 +66,6 @@ dhat-heap.json
 /__pycache__/
 /nix/result
 *.qcow2
+
+# local fork: manual test configs
+/test-conf.lua
