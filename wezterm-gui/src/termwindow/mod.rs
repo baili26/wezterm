@@ -396,6 +396,9 @@ pub struct TermWindow {
     /// Whether keyword highlighting is active for this window.
     /// Toggled by `ToggleKeywordHighlight`, seeded from config on startup.
     pub keyword_highlight_enabled: bool,
+    /// The config value `keyword_highlight_enabled` was last seeded from.
+    /// Used to tell a genuine config change apart from an unrelated reload.
+    keyword_highlight_config_seed: bool,
     tab_bar: TabBarState,
     fancy_tab_bar: Option<box_model::ComputedElement>,
     pub right_status: String,
@@ -719,6 +722,7 @@ impl TermWindow {
             show_tab_bar,
             show_scroll_bar: config.enable_scroll_bar,
             keyword_highlight_enabled: config.keyword_highlight_enabled,
+            keyword_highlight_config_seed: config.keyword_highlight_enabled,
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
             right_status: String::new(),
@@ -1782,9 +1786,13 @@ impl TermWindow {
         );
 
         self.show_scroll_bar = config.enable_scroll_bar;
-        // The runtime toggle is a per-window convenience; an explicit config
-        // reload resets it back to whatever the config says.
-        self.keyword_highlight_enabled = config.keyword_highlight_enabled;
+        // Only follow the config value when it actually changed, so that a
+        // runtime toggle survives unrelated config reloads (appearance changes
+        // and tab bar show/hide also route through this function).
+        if config.keyword_highlight_enabled != self.keyword_highlight_config_seed {
+            self.keyword_highlight_config_seed = config.keyword_highlight_enabled;
+            self.keyword_highlight_enabled = config.keyword_highlight_enabled;
+        }
         self.shape_generation += 1;
         {
             let mut shape_cache = self.shape_cache.borrow_mut();
