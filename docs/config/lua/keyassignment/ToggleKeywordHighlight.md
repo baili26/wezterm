@@ -26,5 +26,3 @@ config.keys = {
 
 return config
 ```
-
-{{since('20261113-local', inline=True)}}
