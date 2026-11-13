@@ -463,10 +463,10 @@ printf '20261113-local\n' > .tag                # 可选：覆盖版本号（.ta
 - `scripts/sync-upstream.sh`：同步脚本。
 - `scripts/fetch-dev-deps.sh` + `scripts/dev-env.sh`：本机缺少 `libxkbcommon-dev` / `libwayland-dev` / `libx11-xcb-dev` 等，且 sudo 需要密码，故把 .deb 解包到 `~/.local/wezterm-sysroot`，用脚本注入 pkg-config / CFLAGS / LIBRARY_PATH。构建前先 `. scripts/dev-env.sh`。
 - 代码：`config/src/keyword.rs`（`KeywordRule`）、`config/src/config.rs`（`keyword_rules` + `keyword_highlight_enabled` + `default_keyword_rules()`）、`config/src/lua.rs`（`wezterm.default_keyword_rules`）、`KeyAssignment::ToggleKeywordHighlight`、`wezterm-gui/src/keywordhighlight.rs`（着色 + 7 个单测）、`render/pane.rs` 钩子、`termwindow/mod.rs` 状态与动作、`commands.rs` 默认键 `CTRL|SHIFT|H`。
-- 测试：`cargo test -p config keyword` 4 passed；`cargo test -p wezterm-gui keyword` 7 passed；`cargo check -p wezterm-gui` 通过。
+- 测试：`cargo test -p config keyword` 5 passed（含 default rules 的 Lua 往返）；`cargo test -p wezterm-gui keyword` 7 passed；`cargo check -p wezterm-gui` 通过；`cargo +nightly fmt --all -- --check` 干净。
 
 待办：
 
-- release 构建 + 真机验证（见第四节端到端清单）。
-- 修改 `~/.config/wezterm/wezterm.lua`：把 `Search` 从 `CTRL|SHIFT|H` 挪到 `CTRL|SHIFT|F`。
+- release 构建 + 真机验证（见第四节端到端清单）。`test-conf.lua` 已放在仓库根（已 gitignore），用来跑端到端验证。
+- 已完成：`~/.config/wezterm/wezterm.lua`（实际文件在 `/data/baili.work/tpl/conf/wezterm/wezterm.lua`）里 `Search` 已从 `CTRL|SHIFT|H` 挪到 `CTRL|SHIFT|F`，`CTRL|SHIFT|H` 显式绑定到 `ToggleKeywordHighlight`。
 - 若要全新机器重建 sysroot：`scripts/fetch-dev-deps.sh`（会把 .deb 缓存到 `~/.local/wezterm-sysroot/debs`）。
