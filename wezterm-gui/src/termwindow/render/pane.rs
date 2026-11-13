@@ -333,6 +333,9 @@ impl crate::TermWindow {
                 white_space: TextureRect,
                 filled_box: TextureRect,
                 window_is_transparent: bool,
+                /// Keyword highlighting rules to apply while painting, or
+                /// `None` when the feature is disabled for this pane.
+                keyword_rules: Option<Vec<config::KeywordRule>>,
                 layers: &'a mut TripleLayerQuadAllocator<'b>,
                 error: Option<anyhow::Error>,
             }
@@ -340,6 +343,21 @@ impl crate::TermWindow {
             let left_pixel_x = padding_left
                 + border.left.get() as f32
                 + (pos.left as f32 * self.render_metrics.cell_size.width as f32);
+
+            // Compute once per pane per frame, then clone (cheap: the regex
+            // internals are shared) so `LineRender` doesn't borrow `self`.
+            // Suppress while an overlay (copy mode / search / quick select)
+            // owns the pane, so their own highlighting wins.
+            let suppress_keyword_highlight =
+                self.pane_state(pos.pane.pane_id()).overlay.is_some();
+            let keyword_rules = if self.keyword_highlight_enabled
+                && !suppress_keyword_highlight
+                && !self.config.keyword_rules.is_empty()
+            {
+                Some(self.config.keyword_rules.clone())
+            } else {
+                None
+            };
 
             let mut render = LineRender {
                 term_window: self,
@@ -363,6 +381,7 @@ impl crate::TermWindow {
                 white_space,
                 filled_box,
                 window_is_transparent,
+                keyword_rules,
                 layers,
                 error: None,
             };
@@ -486,6 +505,22 @@ impl crate::TermWindow {
                         },
                     };
 
+                    // Personal-fork feature: recolor a throw-away copy of the
+                    // line for this paint only.  The model (and therefore
+                    // scrollback, copy/paste and search) is left untouched.
+                    // This happens after the quad cache lookup above, so
+                    // cache hits cost nothing extra.
+                    let styled_line;
+                    let line_to_render: &Line = match &self.keyword_rules {
+                        Some(rules) => {
+                            let mut l = (**line).clone();
+                            crate::keywordhighlight::apply_keyword_rules(rules, &mut l);
+                            styled_line = l;
+                            &styled_line
+                        }
+                        None => *line,
+                    };
+
                     let render_result = self
                         .term_window
                         .render_screen_line(
@@ -495,7 +530,7 @@ impl crate::TermWindow {
                                 pixel_width: self.dims.cols as f32
                                     * self.term_window.render_metrics.cell_size.width as f32,
                                 stable_line_idx: Some(stable_row),
-                                line: &line,
+                                line: line_to_render,
                                 selection: selrange.clone(),
                                 cursor: &self.cursor,
                                 palette: &self.palette,

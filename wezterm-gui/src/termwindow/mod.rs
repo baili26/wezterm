@@ -393,6 +393,9 @@ pub struct TermWindow {
     key_table_state: KeyTableState,
     show_tab_bar: bool,
     show_scroll_bar: bool,
+    /// Whether keyword highlighting is active for this window.
+    /// Toggled by `ToggleKeywordHighlight`, seeded from config on startup.
+    pub keyword_highlight_enabled: bool,
     tab_bar: TabBarState,
     fancy_tab_bar: Option<box_model::ComputedElement>,
     pub right_status: String,
@@ -715,6 +718,7 @@ impl TermWindow {
             dead_key_status: DeadKeyStatus::None,
             show_tab_bar,
             show_scroll_bar: config.enable_scroll_bar,
+            keyword_highlight_enabled: config.keyword_highlight_enabled,
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
             right_status: String::new(),
@@ -1778,6 +1782,9 @@ impl TermWindow {
         );
 
         self.show_scroll_bar = config.enable_scroll_bar;
+        // The runtime toggle is a per-window convenience; an explicit config
+        // reload resets it back to whatever the config says.
+        self.keyword_highlight_enabled = config.keyword_highlight_enabled;
         self.shape_generation += 1;
         {
             let mut shape_cache = self.shape_cache.borrow_mut();
@@ -2778,6 +2785,15 @@ impl TermWindow {
             ScrollToBottom => self.scroll_to_bottom(pane),
             ShowTabNavigator => self.show_tab_navigator(),
             ShowDebugOverlay => self.show_debug_overlay(),
+            ToggleKeywordHighlight => {
+                self.keyword_highlight_enabled = !self.keyword_highlight_enabled;
+                // Invalidate both the shaped-line and quad caches so that
+                // every visible line is re-rendered with/without the rules.
+                self.shape_generation += 1;
+                if let Some(window) = self.window.as_ref() {
+                    window.invalidate();
+                }
+            }
             ShowLauncher => self.show_launcher(),
             ShowLauncherArgs(args) => {
                 let title = args.title.clone().unwrap_or("Launcher".to_string());

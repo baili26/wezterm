@@ -798,6 +798,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &["Help"],
             icon: Some("cod_debug"),
         },
+        ToggleKeywordHighlight => CommandDef {
+            brief: "Toggle keyword highlighting".into(),
+            doc: "Toggles keyword highlighting for the current window".into(),
+            keys: vec![(Modifiers::CTRL.union(Modifiers::SHIFT), "h".into())],
+            args: &[ArgType::ActiveWindow],
+            menubar: &["View"],
+            icon: Some("cod_symbol_color"),
+        },
         InputSelector(_) => CommandDef {
             brief: "Prompt the user to choose from a list".into(),
             doc: "Activates the selector overlay and wait for input".into(),
@@ -2136,6 +2144,8 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ActivateLastTab,
         ShowLauncher,
         ShowTabNavigator,
+        // ----------------- View
+        ToggleKeywordHighlight,
         // ----------------- Help
         OpenUri("https://wezterm.org/".to_string()),
         OpenUri("https://github.com/wezterm/wezterm/discussions/".to_string()),
