@@ -459,14 +459,24 @@ printf '20261113-local\n' > .tag                # 可选：覆盖版本号（.ta
 
 已完成：
 
-- Git：加了 `upstream` remote；`main` 跟踪 `upstream/main`（当前 `ce8e6b14`，与官方完全一致）；功能在 `local` 分支。
+- Git：加了 `upstream` remote；`main` 跟踪 `upstream/main`（当前 `ce8e6b14`，与官方完全一致）；功能在 `local` 分支（tag `hl-v1`）。
+- 已修：`config_was_reloaded()` 会被 appearance 变化和 tab bar 显隐触发，原来在里面无条件重置开关，导致按 `Ctrl+Shift+H` 关掉后立刻被重载重新打开。现在只在配置里的 `keyword_highlight_enabled` 本身变化时才重新播种，运行期切换能保持。
+- 已改：`~/.config/wezterm/wezterm.lua`（实际文件 `/data/baili.work/tpl/conf/wezterm/wezterm.lua`）里 `Search` 从 `CTRL|SHIFT|H` 挪到 `CTRL|SHIFT|F`，`CTRL|SHIFT|H` 显式绑定 `ToggleKeywordHighlight`。
 - `scripts/sync-upstream.sh`：同步脚本。
 - `scripts/fetch-dev-deps.sh` + `scripts/dev-env.sh`：本机缺少 `libxkbcommon-dev` / `libwayland-dev` / `libx11-xcb-dev` 等，且 sudo 需要密码，故把 .deb 解包到 `~/.local/wezterm-sysroot`，用脚本注入 pkg-config / CFLAGS / LIBRARY_PATH。构建前先 `. scripts/dev-env.sh`。
 - 代码：`config/src/keyword.rs`（`KeywordRule`）、`config/src/config.rs`（`keyword_rules` + `keyword_highlight_enabled` + `default_keyword_rules()`）、`config/src/lua.rs`（`wezterm.default_keyword_rules`）、`KeyAssignment::ToggleKeywordHighlight`、`wezterm-gui/src/keywordhighlight.rs`（着色 + 7 个单测）、`render/pane.rs` 钩子、`termwindow/mod.rs` 状态与动作、`commands.rs` 默认键 `CTRL|SHIFT|H`。
-- 测试：`cargo test -p config keyword` 5 passed（含 default rules 的 Lua 往返）；`cargo test -p wezterm-gui keyword` 7 passed；`cargo check -p wezterm-gui` 通过；`cargo +nightly fmt --all -- --check` 干净。
+- 测试：`cargo test -p config keyword` 5 passed（含 default rules 的 Lua 往返）；`cargo test -p wezterm-gui keyword` 7 passed；回归 `cargo test -p config -p wezterm-surface -p wezterm-term -p wezterm-gui` 全绿（13 / 40 / 53 / 25）；`cargo +nightly fmt --all -- --check` 干净。
+
+已完成的真机（Xvfb）验证：
+
+- 预置规则：error 红、warning 黄、success 绿、info 青、IPv4/MAC 紫、URL 下划线、k8s 状态红 —— 逐词像素扫描确认只给命中的词着色（`error` 红、`error:` 里的冒号不着色等）。
+- `Ctrl+Shift+H` 开关：关掉后所有高亮色消失，再按恢复；窗口 resize 后状态保持。
+- copy mode 下自动让位（无关键词着色），退出后恢复。
+- `wezterm.default_keyword_rules()` 删除 / 改色 / 追加：删掉 `ipv4` 后 `10.0.0.5` 不再着色；`warning` 改 `#ffa500` 生效；自定义规则带 `bg` + `underline` 生效。
+- 命令面板可搜到 “Toggle keyword highlighting”。
+- 4000 行压力输出：开/关高亮 CPU 采样 181 vs 174 ticks（6 秒），无可测差异。
 
 待办：
 
-- release 构建 + 真机验证（见第四节端到端清单）。`test-conf.lua` 已放在仓库根（已 gitignore），用来跑端到端验证。
-- 已完成：`~/.config/wezterm/wezterm.lua`（实际文件在 `/data/baili.work/tpl/conf/wezterm/wezterm.lua`）里 `Search` 已从 `CTRL|SHIFT|H` 挪到 `CTRL|SHIFT|F`，`CTRL|SHIFT|H` 显式绑定到 `ToggleKeywordHighlight`。
+- 可选：本机日常使用前，把 `~/.cargo/bin` 加进 PATH（或在 shell profile 里 source `scripts/dev-env.sh`），否则 `cargo`/`wezterm` 新构建不在 PATH 上。
 - 若要全新机器重建 sysroot：`scripts/fetch-dev-deps.sh`（会把 .deb 缓存到 `~/.local/wezterm-sysroot/debs`）。
