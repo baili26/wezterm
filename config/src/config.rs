@@ -14,6 +14,7 @@ use crate::keyassignment::{
     KeyAssignment, KeyTable, KeyTableEntry, KeyTables, MouseEventTrigger, SpawnCommand,
 };
 use crate::keys::{Key, LeaderKey, Mouse};
+use crate::keyword;
 use crate::lua::make_lua_context;
 use crate::ssh::{SshBackend, SshDomain};
 use crate::tls::{TlsDomainClient, TlsDomainServer};
@@ -278,6 +279,22 @@ pub struct Config {
 
     #[dynamic(default = "default_hyperlink_rules")]
     pub hyperlink_rules: Vec<hyperlink::Rule>,
+
+    /// Rules for coloring terminal output as it is rendered.
+    ///
+    /// Each rule matches a regular expression and applies foreground and/or
+    /// background colors (and optionally bold/italic/underline) to the
+    /// matched cells.  Matching happens at paint time, so it applies to both
+    /// the live screen and scrollback without modifying the terminal model.
+    #[dynamic(default = "default_keyword_rules")]
+    pub keyword_rules: Vec<keyword::KeywordRule>,
+
+    /// Whether keyword highlighting is enabled when a new window is created.
+    ///
+    /// This can be toggled at runtime, per-window, via the
+    /// `ToggleKeywordHighlight` key assignment.
+    #[dynamic(default = "default_true")]
+    pub keyword_highlight_enabled: bool,
 
     /// What to set the TERM variable to
     #[dynamic(default = "default_term")]
@@ -1738,6 +1755,132 @@ pub fn default_hyperlink_rules() -> Vec<hyperlink::Rule> {
         hyperlink::Rule::new(hyperlink::GENERIC_HYPERLINK_PATTERN, "$0").unwrap(),
         // implicit mailto link
         hyperlink::Rule::new(r"\b\w+@[\w-]+(\.[\w-]+)+\b", "mailto:$0").unwrap(),
+    ]
+}
+
+/// The compiled-in default keyword highlighting rules.
+///
+/// Loosely inspired by the categories that MobaXterm ships with (ok /
+/// warning / error keywords), but deliberately limited to conservative
+/// word-boundary matches to avoid false positives.  Users can replace,
+/// remove or extend these from Lua; see `wezterm.default_keyword_rules()`.
+pub fn default_keyword_rules() -> Vec<keyword::KeywordRule> {
+    // A palette that reads well on both dark and light backgrounds.
+    const RED: &str = "#ff5f5f";
+    const YELLOW: &str = "#ffd75f";
+    const GREEN: &str = "#5fd75f";
+    const CYAN: &str = "#5fd7ff";
+    const PURPLE: &str = "#d787ff";
+
+    fn rule(
+        name: &str,
+        regex: &str,
+        fg: Option<&str>,
+        bold: bool,
+        underline: bool,
+    ) -> keyword::KeywordRule {
+        let mut rule = keyword::KeywordRule::new(regex, fg)
+            .unwrap_or_else(|err| panic!("invalid built-in keyword rule {}: {:#}", name, err))
+            .with_name(name);
+        if bold {
+            rule = rule.with_bold();
+        }
+        if underline {
+            rule = rule.with_underline();
+        }
+        rule
+    }
+
+    vec![
+        rule(
+            "error",
+            concat!(
+                r"(?i)\b(",
+                r"fail(ed|ure)?|error|errors?|fatal|panic|exception|traceback|",
+                r"denied|refused|not found|no such file|segmentation fault|",
+                r"core dumped|abort(ed)?|critical|invalid|unsupported|cannot|",
+                r"unable to|out of memory|oom|no space left|connection reset|",
+                r"unreachable|killed",
+                r")\b",
+                "|错误|失败|异常|致命",
+            ),
+            Some(RED),
+            true,
+            false,
+        ),
+        rule(
+            "warning",
+            concat!(
+                r"(?i)\b(",
+                r"warn(ing)?s?|caution|deprecated|timeout|timed out|retry(ing)?|",
+                r"too many|degraded|unhealthy|back-?off|restart(ing)?|",
+                r"probe failed|not ready",
+                r")\b",
+                "|警告|注意|超时",
+            ),
+            Some(YELLOW),
+            false,
+            false,
+        ),
+        rule(
+            "success",
+            concat!(
+                r"(?i)\b(",
+                r"ok|okay|success(ful|fully)?|succeeded|done|pass(ed)?|",
+                r"complete(d)?|healthy|active \(running\)|listening on",
+                r")\b",
+                "|成功|已完成",
+            ),
+            Some(GREEN),
+            false,
+            false,
+        ),
+        rule(
+            "info",
+            concat!(
+                r"(?i)\b(",
+                r"info(rmation)?|notice|starting|started|loading|loaded|creating|",
+                r"created|building|built|checking|launching|connected to",
+                r")\b",
+                "|信息|开始",
+            ),
+            Some(CYAN),
+            false,
+            false,
+        ),
+        rule(
+            "ipv4",
+            r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+            Some(PURPLE),
+            false,
+            false,
+        ),
+        rule(
+            "mac",
+            r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b",
+            Some(PURPLE),
+            false,
+            false,
+        ),
+        rule(
+            "url",
+            r#"https?://[^\s'"<>]+"#,
+            None,
+            false,
+            true,
+        ),
+        rule(
+            "k8s-status",
+            concat!(
+                r"\b(",
+                r"ErrImagePull|ImagePullBackOff|CrashLoopBackOff|OOMKilled|",
+                r"Evicted|Pending|Terminating",
+                r")\b"
+            ),
+            Some(RED),
+            true,
+            false,
+        ),
     ]
 }
 
