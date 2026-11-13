@@ -14,7 +14,6 @@ use crate::keyassignment::{
     KeyAssignment, KeyTable, KeyTableEntry, KeyTables, MouseEventTrigger, SpawnCommand,
 };
 use crate::keys::{Key, LeaderKey, Mouse};
-use crate::keyword;
 use crate::lua::make_lua_context;
 use crate::ssh::{SshBackend, SshDomain};
 use crate::tls::{TlsDomainClient, TlsDomainServer};
@@ -23,7 +22,7 @@ use crate::unix::UnixDomain;
 use crate::wsl::WslDomain;
 use crate::{
     default_config_with_overrides_applied, default_one_point_oh, default_one_point_oh_f64,
-    default_true, default_win32_acrylic_accent_color, CellWidth, GpuInfo,
+    default_true, default_win32_acrylic_accent_color, keyword, CellWidth, GpuInfo,
     IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods, RgbaColor,
     SerialDomain, SystemBackdrop, WebGpuPowerPreference, CONFIG_DIRS, CONFIG_FILE_OVERRIDE,
     CONFIG_OVERRIDES, CONFIG_SKIP, HOME_DIR,
@@ -1862,13 +1861,7 @@ pub fn default_keyword_rules() -> Vec<keyword::KeywordRule> {
             false,
             false,
         ),
-        rule(
-            "url",
-            r#"https?://[^\s'"<>]+"#,
-            None,
-            false,
-            true,
-        ),
+        rule("url", r#"https?://[^\s'"<>]+"#, None, false, true),
         rule(
             "k8s-status",
             concat!(

@@ -348,8 +348,7 @@ impl crate::TermWindow {
             // internals are shared) so `LineRender` doesn't borrow `self`.
             // Suppress while an overlay (copy mode / search / quick select)
             // owns the pane, so their own highlighting wins.
-            let suppress_keyword_highlight =
-                self.pane_state(pos.pane.pane_id()).overlay.is_some();
+            let suppress_keyword_highlight = self.pane_state(pos.pane.pane_id()).overlay.is_some();
             let keyword_rules = if self.keyword_highlight_enabled
                 && !suppress_keyword_highlight
                 && !self.config.keyword_rules.is_empty()

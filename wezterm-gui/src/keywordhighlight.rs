@@ -157,7 +157,10 @@ mod test {
             ],
             &mut line,
         );
-        let colors: Vec<_> = line.visible_cells().map(|c| c.attrs().foreground()).collect();
+        let colors: Vec<_> = line
+            .visible_cells()
+            .map(|c| c.attrs().foreground())
+            .collect();
         assert_eq!(colors[0], fg("#ff0000"));
         assert_eq!(colors[1], fg("#00ff00"));
         assert_eq!(colors[2], fg("#00ff00"));
