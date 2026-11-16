@@ -644,6 +644,9 @@ pub enum KeyAssignment {
     ResetTerminal,
     OpenUri(String),
     ActivateCommandPalette,
+    /// Open the snippet palette: a searchable list of snippet files with a
+    /// preview of the selected snippet's body.
+    ShowSnippetPalette,
     ActivateWindow(usize),
     ActivateWindowRelative(isize),
     ActivateWindowRelativeNoWrap(isize),

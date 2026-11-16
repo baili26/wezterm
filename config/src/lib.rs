@@ -36,6 +36,7 @@ pub mod lua;
 pub mod meta;
 mod scheme_data;
 mod serial;
+mod snippet;
 mod ssh;
 mod terminal;
 mod tls;
@@ -57,6 +58,7 @@ pub use frontend::*;
 pub use keys::*;
 pub use keyword::*;
 pub use serial::*;
+pub use snippet::*;
 pub use ssh::*;
 pub use terminal::*;
 pub use tls::*;
@@ -70,6 +72,8 @@ type ErrorCallback = fn(&str);
 lazy_static! {
     pub static ref HOME_DIR: PathBuf = dirs_next::home_dir().expect("can't find HOME dir");
     pub static ref CONFIG_DIRS: Vec<PathBuf> = config_dirs();
+    /// The user's own wezterm config directory (`$XDG_CONFIG_HOME/wezterm`).
+    pub static ref CONFIG_DIR: PathBuf = xdg_config_home();
     pub static ref RUNTIME_DIR: PathBuf = compute_runtime_dir().unwrap();
     pub static ref DATA_DIR: PathBuf = compute_data_dir().unwrap();
     pub static ref CACHE_DIR: PathBuf = compute_cache_dir().unwrap();

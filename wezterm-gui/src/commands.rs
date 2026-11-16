@@ -2019,6 +2019,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &["Edit"],
             icon: None,
         },
+        ShowSnippetPalette => CommandDef {
+            brief: "Show Snippet Palette".into(),
+            doc: "Search snippets stored as files and insert the selected one".into(),
+            keys: vec![(Modifiers::CTRL.union(Modifiers::ALT), "o".into())],
+            args: &[ArgType::ActivePane],
+            menubar: &["Edit"],
+            icon: None,
+        },
     })
 }
 
@@ -2062,6 +2070,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ActivateCopyMode,
         ClearKeyTableStack,
         ActivateCommandPalette,
+        ShowSnippetPalette,
         // ----------------- View
         DecreaseFontSize,
         IncreaseFontSize,

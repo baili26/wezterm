@@ -37,6 +37,21 @@ pub fn matcher_pattern(s: &str) -> Pattern {
     )
 }
 
+/// Like [`matcher_score`], but also returns the byte-independent character
+/// indices that matched, for highlighting.
+///
+/// `indices` are char offsets into `s`, sorted and deduplicated.
+pub fn matcher_indices(pattern: &Pattern, s: &str) -> Option<(u32, Vec<usize>)> {
+    MATCHER.with_borrow_mut(|matcher| {
+        let mut buf = vec![];
+        let mut indices = vec![];
+        let score = pattern.indices(Utf32Str::new(s, &mut buf), matcher, &mut indices)?;
+        indices.sort_unstable();
+        indices.dedup();
+        Some((score, indices.into_iter().map(|i| i as usize).collect()))
+    })
+}
+
 struct SelectorState {
     active_idx: usize,
     max_items: usize,

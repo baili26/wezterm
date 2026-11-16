@@ -271,17 +271,25 @@ impl super::TermWindow {
         if is_down {
             if only_key_bindings == OnlyKeyBindings::No {
                 if let Some(modal) = self.get_modal() {
-                    if let Key::Code(term_key) = self.win_key_code_to_termwiz_key_code(keycode) {
-                        match modal.key_down(term_key, raw_modifiers.remove_positional_mods(), self)
-                        {
-                            Ok(true) => return true,
-                            Ok(false) => {}
-                            Err(err) => {
+                    // A modal owns the keyboard: text from the input method
+                    // must go to it too (otherwise a multi-character Chinese
+                    // phrase lands in the pane behind the panel).
+                    match self.win_key_code_to_termwiz_key_code(keycode) {
+                        Key::Code(term_key) => {
+                            if let Err(err) = modal.key_down(
+                                term_key,
+                                raw_modifiers.remove_positional_mods(),
+                                self,
+                            ) {
                                 log::error!("Error dispatching key to modal: {err:#}");
-                                return true;
                             }
                         }
+                        Key::Composed(text) => {
+                            modal.composed_text(&text, self);
+                        }
+                        Key::None => {}
                     }
+                    return true;
                 }
             }
 
@@ -732,6 +740,15 @@ impl super::TermWindow {
                     return;
                 }
                 self.key_table_state.did_process_key();
+                if let Some(modal) = self.get_modal() {
+                    if modal.composed_text(&s, self) {
+                        context.invalidate();
+                        return;
+                    }
+                    // A modal owns input: never let composed text fall through
+                    // to the pane behind it.
+                    return;
+                }
                 if self.config.debug_key_events {
                     log::info!("send to pane string={:?}", s);
                 }

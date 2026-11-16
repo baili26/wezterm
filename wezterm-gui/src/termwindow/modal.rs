@@ -14,6 +14,16 @@ pub trait Modal: Downcast {
         false
     }
     fn mouse_event(&self, event: MouseEvent, term_window: &mut TermWindow) -> anyhow::Result<()>;
+
+    /// Text produced by an input method (IME), dead keys, or compose.
+    ///
+    /// Without this, composed text bypasses the modal entirely and lands in
+    /// the terminal behind it - typing a multi-character Chinese phrase would
+    /// go straight to the shell instead of the panel's input line.
+    /// Return true if the text was consumed.
+    fn composed_text(&self, _text: &str, _term_window: &mut TermWindow) -> bool {
+        false
+    }
     fn key_down(
         &self,
         key: KeyCode,

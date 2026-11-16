@@ -22,7 +22,7 @@ use crate::unix::UnixDomain;
 use crate::wsl::WslDomain;
 use crate::{
     default_config_with_overrides_applied, default_one_point_oh, default_one_point_oh_f64,
-    default_true, default_win32_acrylic_accent_color, keyword, CellWidth, GpuInfo,
+    default_true, default_win32_acrylic_accent_color, keyword, snippet, CellWidth, GpuInfo,
     IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods, RgbaColor,
     SerialDomain, SystemBackdrop, WebGpuPowerPreference, CONFIG_DIRS, CONFIG_FILE_OVERRIDE,
     CONFIG_OVERRIDES, CONFIG_SKIP, HOME_DIR,
@@ -294,6 +294,14 @@ pub struct Config {
     /// `ToggleKeywordHighlight` key assignment.
     #[dynamic(default = "default_true")]
     pub keyword_highlight_enabled: bool,
+
+    /// Layout and behavior of the snippet palette.
+    ///
+    /// The snippet palette lists text snippets stored as files under
+    /// `snippet_panel.dir`, and inserts the selected one into the active
+    /// pane.  See `ShowSnippetPalette`.
+    #[dynamic(default)]
+    pub snippet_panel: snippet::SnippetPanelConfig,
 
     /// What to set the TERM variable to
     #[dynamic(default = "default_term")]

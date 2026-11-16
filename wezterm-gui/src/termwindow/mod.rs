@@ -74,6 +74,7 @@ pub mod box_model;
 pub mod charselect;
 pub mod clipboard;
 pub mod keyevent;
+pub mod list_preview;
 pub mod modal;
 mod mouseevent;
 pub mod palette;
@@ -82,6 +83,7 @@ mod prevcursor;
 pub mod render;
 pub mod resize;
 mod selection;
+pub mod snippet_palette;
 pub mod spawn;
 pub mod webgpu;
 use crate::spawn::SpawnWhere;
@@ -3182,6 +3184,26 @@ impl TermWindow {
             }
             ActivateCommandPalette => {
                 let modal = crate::termwindow::palette::CommandPalette::new(self);
+                self.set_modal(Rc::new(modal));
+            }
+            ShowSnippetPalette => {
+                let pane_id = pane.pane_id();
+                let cfg = &self.config.snippet_panel;
+                let source = crate::termwindow::snippet_palette::SnippetSource::new(
+                    cfg.snippet_dir(),
+                    cfg.placeholder,
+                    cfg.enable_trash,
+                );
+                let wrap = cfg.preview_wrap;
+                let preview_meta = cfg.preview_meta;
+                let footer = cfg.footer.into();
+                let modal = crate::termwindow::list_preview::ListPreviewModal::new(
+                    Box::new(source),
+                    Some(pane_id),
+                    wrap,
+                    preview_meta,
+                    footer,
+                );
                 self.set_modal(Rc::new(modal));
             }
             PromptInputLine(args) => self.show_prompt_input_line(args),

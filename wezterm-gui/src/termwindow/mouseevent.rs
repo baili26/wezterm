@@ -119,6 +119,51 @@ impl super::TermWindow {
 
         self.last_mouse_coords = (x, y);
 
+        // A modal owns the mouse while it is open: without this, clicks and
+        // drags fall straight through to the pane behind the panel and the
+        // user selects terminal text they cannot even see.
+        if let Some(modal) = self.get_modal() {
+            let term_event = wezterm_term::MouseEvent {
+                kind: match event.kind {
+                    WMEK::Move => TMEK::Move,
+                    WMEK::VertWheel(_) | WMEK::HorzWheel(_) | WMEK::Press(_) => TMEK::Press,
+                    WMEK::Release(_) => TMEK::Release,
+                },
+                button: match event.kind {
+                    WMEK::Release(ref press) | WMEK::Press(ref press) => mouse_press_to_tmb(press),
+                    WMEK::Move => match event.mouse_buttons {
+                        WMB::LEFT => TMB::Left,
+                        WMB::RIGHT => TMB::Right,
+                        WMB::MIDDLE => TMB::Middle,
+                        _ => TMB::None,
+                    },
+                    WMEK::VertWheel(amount) => {
+                        if amount > 0 {
+                            TMB::WheelUp(amount as usize)
+                        } else {
+                            TMB::WheelDown((-amount) as usize)
+                        }
+                    }
+                    WMEK::HorzWheel(amount) => {
+                        if amount > 0 {
+                            TMB::WheelLeft(amount as usize)
+                        } else {
+                            TMB::WheelRight((-amount) as usize)
+                        }
+                    }
+                },
+                x,
+                y,
+                x_pixel_offset,
+                y_pixel_offset,
+                modifiers: event.modifiers,
+            };
+            if let Err(err) = modal.mouse_event(term_event, self) {
+                log::error!("modal mouse_event failed: {err:#}");
+            }
+            return;
+        }
+
         let mut capture_mouse = false;
 
         match event.kind {
