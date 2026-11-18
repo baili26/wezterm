@@ -25,3 +25,6 @@ hide:
 * iTerm2 compatible image protocol support, and built-in [imgcat command](imgcat.md)
 * Kitty graphics support
 * Sixel graphics support (experimental: starting in `20200620-160318-e00b076c`)
+* ZMODEM file transfer: run `sz`/`rz` inside a pane and files move without a
+  separate `scp` (personal-fork feature, off by default; see
+  [zmodem](config/lua/config/zmodem.md))
