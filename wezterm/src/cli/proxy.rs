@@ -26,6 +26,9 @@ impl ProxyCommand {
 
         let mux = Arc::new(mux::Mux::new(None));
         Mux::set_mux(&mux);
+        // This process only forwards; it must not accept downloads meant for
+        // the user's machine.
+        mux::zmodem::set_local_file_access_allowed(false);
 
         let target = unix_dom.target();
         let mut stream = unix_connect_with_retry(&target, false, None)?;

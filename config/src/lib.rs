@@ -45,6 +45,7 @@ mod unix;
 mod version;
 pub mod window;
 mod wsl;
+mod zmodem;
 
 pub use crate::config::*;
 pub use background::*;
@@ -66,6 +67,7 @@ pub use units::*;
 pub use unix::*;
 pub use version::*;
 pub use wsl::*;
+pub use zmodem::*;
 
 type ErrorCallback = fn(&str);
 

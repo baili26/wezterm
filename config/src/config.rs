@@ -22,7 +22,7 @@ use crate::unix::UnixDomain;
 use crate::wsl::WslDomain;
 use crate::{
     default_config_with_overrides_applied, default_one_point_oh, default_one_point_oh_f64,
-    default_true, default_win32_acrylic_accent_color, keyword, snippet, CellWidth, GpuInfo,
+    default_true, default_win32_acrylic_accent_color, keyword, snippet, zmodem, CellWidth, GpuInfo,
     IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods, RgbaColor,
     SerialDomain, SystemBackdrop, WebGpuPowerPreference, CONFIG_DIRS, CONFIG_FILE_OVERRIDE,
     CONFIG_OVERRIDES, CONFIG_SKIP, HOME_DIR,
@@ -302,6 +302,14 @@ pub struct Config {
     /// pane.  See `ShowSnippetPalette`.
     #[dynamic(default)]
     pub snippet_panel: snippet::SnippetPanelConfig,
+
+    /// ZMODEM (lrzsz `rz`/`sz`) file transfer.
+    ///
+    /// Off by default: when enabled, a program running in a pane can ask
+    /// WezTerm to receive files into local disk, and can receive files chosen
+    /// from local disk.  See `docs-internal/zmodem.md`.
+    #[dynamic(default)]
+    pub zmodem: zmodem::ZmodemConfig,
 
     /// What to set the TERM variable to
     #[dynamic(default = "default_term")]

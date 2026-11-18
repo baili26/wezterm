@@ -48,6 +48,7 @@ pub mod tmux;
 pub mod tmux_commands;
 mod tmux_pty;
 pub mod window;
+pub mod zmodem;
 
 use crate::activity::Activity;
 
@@ -137,6 +138,52 @@ fn send_actions_to_mux(pane: &Weak<dyn Pane>, dead: &Arc<AtomicBool>, actions: V
     histogram!("send_actions_to_mux.rate").record(1.);
 }
 
+/// Applies the bookkeeping every parsed action needs: tracking synchronized
+/// output (DEC 2026) and soft resets, and accumulating actions for the next
+/// flush to the terminal model.
+fn dispatch_action(
+    action: Action,
+    actions: &mut Vec<Action>,
+    hold: &mut bool,
+    action_size: &mut usize,
+    pane: &Weak<dyn Pane>,
+    dead: &Arc<AtomicBool>,
+) {
+    let mut flush = false;
+    match &action {
+        Action::CSI(CSI::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
+            DecPrivateModeCode::SynchronizedOutput,
+        )))) => {
+            // Synchronized output frame started:
+            // => We hold off ~all actions that applies changes to the terminal.
+            *hold = true;
+
+            // => We also flush prior actions
+            flush = true;
+        }
+        Action::CSI(CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+            DecPrivateModeCode::SynchronizedOutput,
+        )))) => {
+            // Synchronized output frame ended:
+            // => We flush out all pending actions to the terminal.
+            *hold = false;
+            flush = true;
+        }
+        Action::CSI(CSI::Device(dev)) if matches!(**dev, Device::SoftReset) => {
+            // Soft reset requested
+            *hold = false;
+            flush = true;
+        }
+        _ => {}
+    };
+    action.append_to(actions);
+
+    if flush && !actions.is_empty() {
+        send_actions_to_mux(pane, dead, std::mem::take(actions));
+        *action_size = 0;
+    }
+}
+
 /// This is the parsing loop for the given pane.
 /// It reads all data sent to `rx` (from pane PTY) and handles all terminal events for this pane.
 fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: FileDescriptor) {
@@ -147,6 +194,8 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
     let mut action_size = 0;
     let mut delay = Duration::from_millis(configuration().mux_output_parser_coalesce_delay_ms);
     let mut deadline = None;
+    let mut zmodem = zmodem::ZmodemDetector::new();
+    let mut zmodem_enabled = zmodem::enabled();
 
     loop {
         match rx.read(&mut buf) {
@@ -159,41 +208,88 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
                 break;
             }
             Ok(size) => {
-                parser.parse(&buf[0..size], |action| {
-                    let mut flush = false;
-                    match &action {
-                        Action::CSI(CSI::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
-                            DecPrivateModeCode::SynchronizedOutput,
-                        )))) => {
-                            // Synchronized output frame started:
-                            // => We hold off ~all actions that applies changes to the terminal.
-                            hold = true;
-
-                            // => We also flush prior actions
-                            flush = true;
-                        }
-                        Action::CSI(CSI::Mode(Mode::ResetDecPrivateMode(
-                            DecPrivateMode::Code(DecPrivateModeCode::SynchronizedOutput),
-                        ))) => {
-                            // Synchronized output frame ended:
-                            // => We flush out all pending actions to the terminal.
-                            hold = false;
-                            flush = true;
-                        }
-                        Action::CSI(CSI::Device(dev)) if matches!(**dev, Device::SoftReset) => {
-                            // Soft reset requested
-                            hold = false;
-                            flush = true;
-                        }
-                        _ => {}
-                    };
-                    action.append_to(&mut actions);
-
-                    if flush && !actions.is_empty() {
-                        send_actions_to_mux(&pane, &dead, std::mem::take(&mut actions));
-                        action_size = 0;
+                // ZMODEM is a raw 8-bit stream protocol, but everything below
+                // this point has already been decoded into terminal actions.
+                // Sniff for its trigger before the VT parser sees the bytes.
+                let mut fresh_trigger = false;
+                let trigger = if zmodem_enabled {
+                    let feed = zmodem.feed(&buf[0..size]);
+                    let passthrough = feed.passthrough;
+                    let trigger = feed.trigger;
+                    fresh_trigger = feed.fresh;
+                    if !passthrough.is_empty() || trigger.is_some() {
+                        parser.parse(&passthrough, |action| {
+                            dispatch_action(
+                                action,
+                                &mut actions,
+                                &mut hold,
+                                &mut action_size,
+                                &pane,
+                                dead,
+                            );
+                        });
                     }
-                });
+                    trigger
+                } else {
+                    parser.parse(&buf[0..size], |action| {
+                        dispatch_action(
+                            action,
+                            &mut actions,
+                            &mut hold,
+                            &mut action_size,
+                            &pane,
+                            dead,
+                        );
+                    });
+                    None
+                };
+
+                // Did the program print anything of its own before the
+                // handshake?  A user-typed `rz` is preceded by the shell echo
+                // and by `rz waiting to receive.`; a peer that is merely
+                // retrying its handshake sends the signature alone.
+                if let Some(mode) = trigger {
+                    // Flush whatever the program printed before the trigger so
+                    // the user sees it, then hand the byte stream over to the
+                    // session for the duration of the transfer.
+                    if !actions.is_empty() {
+                        send_actions_to_mux(&pane, &dead, std::mem::take(&mut actions));
+                    }
+                    action_size = 0;
+                    hold = false;
+                    deadline = None;
+
+                    let seed = zmodem.take_seed();
+                    zmodem.reset();
+                    if let Some(pane_id) = pane.upgrade().map(|p| p.pane_id()) {
+                        // A trigger with no program output before it is the
+                        // peer retrying a handshake we already gave up on, so
+                        // it must not reopen a session - otherwise a cancelled
+                        // transfer traps the user in the upload prompt.
+                        if !fresh_trigger && zmodem::in_abort_cooldown(pane_id) {
+                            // The peer is still retrying a handshake we just
+                            // cancelled.  Answer with the cancel sequence
+                            // instead of starting a new session, so the pane
+                            // goes back to the shell.  No ETX: writing one
+                            // leaves the byte in the tty input queue, and the
+                            // shell echoes it as `^C` once the peer dies.
+                            log::debug!("zmodem: pane {pane_id}: ignoring retrigger");
+                            if let Some(pane) = pane.upgrade() {
+                                let mut writer = pane.writer();
+                                let _ = writer.write_all(&[0x18; 10]);
+                            }
+                            zmodem::interrupt_peer(pane_id);
+                            continue;
+                        }
+                        zmodem::run(pane_id, pane.clone(), &mut rx, dead, mode, seed);
+                    }
+                    // lrzsz signs off with a literal `OO`; swallow it so it
+                    // does not get drawn onto the freshly restored prompt.
+                    zmodem.expect_epilogue();
+                    // Pick up config changes that happened during the transfer.
+                    zmodem_enabled = zmodem::enabled();
+                    continue;
+                }
                 action_size += size;
                 if !actions.is_empty() && !hold {
                     // If we haven't accumulated too much data,
@@ -241,6 +337,19 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
     // to be displayed before we return from here; this is important
     // for very short lived commands so that we don't forget to
     // display what they displayed.
+    let tail = zmodem.flush();
+    if !tail.is_empty() {
+        parser.parse(&tail, |action| {
+            dispatch_action(
+                action,
+                &mut actions,
+                &mut hold,
+                &mut action_size,
+                &pane,
+                dead,
+            );
+        });
+    }
     if !actions.is_empty() {
         send_actions_to_mux(&pane, &dead, std::mem::take(&mut actions));
     }

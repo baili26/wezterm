@@ -275,6 +275,7 @@ xcb-imdkit = { version="0.3", git="https://github.com/wezterm/xcb-imdkit-rs.git"
 xkbcommon = "0.7.0"
 xml-rs = "0.8"
 zbus = "4.2"
+zmodem2 = "0.7.3"
 zstd = "0.11"
 zvariant = "4.0"
 

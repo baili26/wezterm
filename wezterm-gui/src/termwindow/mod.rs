@@ -1057,6 +1057,14 @@ impl TermWindow {
                     Some(pane) => pane,
                     None => return Ok(true),
                 };
+                // A dropped file is the natural way to choose what a ZMODEM
+                // upload should send, so offer it to an in-flight transfer
+                // before falling back to pasting the paths.
+                if mux::zmodem::is_active(pane.pane_id())
+                    && mux::zmodem::offer_upload(pane.pane_id(), paths.clone())
+                {
+                    return Ok(true);
+                }
                 let paths = paths
                     .iter()
                     .map(|path| {

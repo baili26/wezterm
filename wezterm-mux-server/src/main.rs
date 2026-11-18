@@ -227,6 +227,10 @@ fn run() -> anyhow::Result<()> {
     let domain: Arc<dyn Domain> = Arc::new(LocalDomain::new("local")?);
     let mux = Arc::new(mux::Mux::new(Some(domain.clone())));
     Mux::set_mux(&mux);
+    // Panes live in this process, but the files a ZMODEM transfer would write
+    // belong to whoever is attached, not to this host.  Refuse to touch the
+    // local filesystem on a remote peer's behalf.
+    mux::zmodem::set_local_file_access_allowed(false);
 
     let executor = promise::spawn::SimpleExecutor::new();
 

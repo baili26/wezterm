@@ -3580,6 +3580,7 @@ dependencies = [
  "chrono",
  "config",
  "crossbeam",
+ "dirs-next",
  "downcast-rs",
  "fancy-regex",
  "filedescriptor",
@@ -3605,6 +3606,7 @@ dependencies = [
  "serial2",
  "shell-words",
  "smol",
+ "tempfile",
  "terminfo",
  "termwiz",
  "termwiz-funcs",
@@ -3615,6 +3617,7 @@ dependencies = [
  "wezterm-ssh",
  "wezterm-term",
  "windows-sys 0.61.2",
+ "zmodem2",
 ]
 
 [[package]]
@@ -7120,7 +7123,6 @@ dependencies = [
  "colorgrad",
  "config",
  "dhat",
- "dirs-next",
  "downcast-rs",
  "embed-resource",
  "emojis",
@@ -8476,6 +8478,17 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zmodem2"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a4c6cda9d8fd2379ce54d171a1a3a387ff6789b4c9de140586b91a217749ff1"
+dependencies = [
+ "bitflags 2.13.1",
+ "hex",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "zstd"

@@ -43,7 +43,6 @@ codec.workspace = true
 colorgrad.workspace = true
 config.workspace = true
 dhat = {workspace=true, optional=true}
-dirs-next.workspace = true
 downcast-rs.workspace = true
 emojis.workspace = true
 env-bootstrap.workspace = true

@@ -398,6 +398,11 @@ impl Pane for LocalPane {
 
     fn key_down(&self, key: KeyCode, mods: KeyModifiers) -> Result<(), Error> {
         Mux::get().record_input_for_current_identity();
+        // While a ZMODEM transfer owns the byte stream, keystrokes would
+        // corrupt it.  Ctrl-C is the way to cancel.
+        if crate::zmodem::handle_key(self.pane_id, key, mods) {
+            return Ok(());
+        }
         if self.tmux_domain.lock().is_some() {
             log::trace!("key: {:?}", key);
             if key == KeyCode::Char('q') {
@@ -437,8 +442,28 @@ impl Pane for LocalPane {
         Ok(Some(self.pty.lock().try_clone_reader()?))
     }
 
+    fn send_composed_text(&self, text: &str) -> Result<(), Error> {
+        if crate::zmodem::is_active(self.pane_id) {
+            // IME/compose input during a transfer belongs to the upload
+            // prompt, not to the child process.
+            for c in text.chars() {
+                crate::zmodem::handle_key(self.pane_id, KeyCode::Char(c), KeyModifiers::NONE);
+            }
+            return Ok(());
+        }
+        self.writer().write_all(text.as_bytes())?;
+        Ok(())
+    }
+
     fn send_paste(&self, text: &str) -> Result<(), Error> {
         Mux::get().record_input_for_current_identity();
+        if crate::zmodem::is_active(self.pane_id) {
+            // Pasting mid-transfer would be written into the protocol stream.
+            // Route it into the upload prompt instead, which is where the user
+            // means it to go.
+            crate::zmodem::handle_paste(self.pane_id, text);
+            return Ok(());
+        }
         if self.tmux_domain.lock().is_some() {
             Ok(())
         } else {
@@ -852,15 +877,54 @@ pub(crate) fn emit_output_for_pane(pane_id: PaneId, message: &str) {
     let mut parser = termwiz::escape::parser::Parser::new();
     let mut actions = vec![Action::CSI(CSI::Sgr(Sgr::Reset))];
     parser.parse(message.as_bytes(), |action| actions.push(action));
+    apply_output_to_pane(pane_id, actions);
+}
 
+/// Like [`emit_output_for_pane`], but waits for the terminal model to consume
+/// the text before returning.
+///
+/// Use this for output that has to land *before* something else the child
+/// prints: the asynchronous version races with it, and a summary line that
+/// arrives after the shell has already drawn its prompt leaves the cursor
+/// mid-line, which looks like the terminal swallowed a newline.
+pub(crate) fn emit_output_for_pane_sync(pane_id: PaneId, message: &str) {
+    let mut parser = termwiz::escape::parser::Parser::new();
+    let mut actions = vec![Action::CSI(CSI::Sgr(Sgr::Reset))];
+    parser.parse(message.as_bytes(), |action| actions.push(action));
+
+    if Mux::try_get()
+        .map(|mux| mux.is_main_thread())
+        .unwrap_or(false)
+    {
+        apply_output_now(pane_id, actions);
+        return;
+    }
+
+    // A rendezvous channel does the job without pulling in a Promise: the
+    // main thread signals when the actions have been consumed, and we wait a
+    // bounded time so a wedged main thread cannot stall the transfer forever.
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
     promise::spawn::spawn_into_main_thread(async move {
-        let mux = Mux::get();
-        if let Some(pane) = mux.get_pane(pane_id) {
-            pane.perform_actions(actions);
-            mux.notify(MuxNotification::PaneOutput(pane_id));
-        }
+        apply_output_now(pane_id, actions);
+        let _ = tx.send(());
     })
     .detach();
+    let _ = rx.recv_timeout(std::time::Duration::from_millis(500));
+}
+
+fn apply_output_to_pane(pane_id: PaneId, actions: Vec<Action>) {
+    promise::spawn::spawn_into_main_thread(async move {
+        apply_output_now(pane_id, actions);
+    })
+    .detach();
+}
+
+fn apply_output_now(pane_id: PaneId, actions: Vec<Action>) {
+    let mux = Mux::get();
+    if let Some(pane) = mux.get_pane(pane_id) {
+        pane.perform_actions(actions);
+        mux.notify(MuxNotification::PaneOutput(pane_id));
+    }
 }
 
 impl wezterm_term::DeviceControlHandler for LocalPaneDCSHandler {
