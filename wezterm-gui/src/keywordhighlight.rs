@@ -54,23 +54,18 @@ pub fn apply_keyword_rules(rules: &[KeywordRule], line: &mut Line) {
     // (cell_index, rule_index) pairs to paint.  Collected first, then applied
     // in one pass, so the mutable borrow of the line happens once.
     let mut hits: Vec<(usize, usize)> = Vec::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
 
     for (rule_idx, rule) in rules.iter().enumerate() {
-        for found in rule.regex.find_iter(&text) {
-            let m = match found {
-                Ok(m) => m,
-                // fancy_regex can fail at runtime (e.g. backtrack limit);
-                // skip that match rather than aborting the whole paint.
-                Err(_) => continue,
-            };
-            let (start, end) = (m.start(), m.end());
-            if start >= end {
-                // Zero-width match: nothing to paint.
-                continue;
-            }
-            for span in &spans {
-                if span.byte_end <= start || span.byte_start >= end {
-                    continue;
+        ranges.clear();
+        rule.regex.find_ranges(&text, &mut ranges);
+        for &(start, end) in &ranges {
+            // `spans` is sorted by byte_start, so skip to the first span that
+            // can overlap the match instead of rescanning the whole line.
+            let first = spans.partition_point(|s| s.byte_end <= start);
+            for span in &spans[first..] {
+                if span.byte_start >= end {
+                    break;
                 }
                 for idx in span.cell_index..span.cell_index + span.width {
                     hits.push((idx, rule_idx));
