@@ -26,7 +26,7 @@ config.keyword_rules = {
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `regex` | string | ✅ | 匹配正则。支持 fancy-regex：lookaround `(?=)` `(?<=)`、反向引用 `\1` |
+| `regex` | string | ✅ | 匹配正则。支持 fancy-regex：lookaround `(?=)` `(?<=)`、反向引用 `\1`。只用 `\b` 等普通语法时自动走 regex crate 快引擎；见第 9 节 |
 | `fg` | 颜色 | | 前景色 |
 | `bg` | 颜色 | | 背景色 |
 | `bold` | bool | | 加粗（默认 false） |
@@ -157,7 +157,7 @@ config.keyword_rules = {
 | 匹配过头（比如路径里的 ok） | 加词边界 `\b`，或收窄成 `\bOK\b`、`(?i)\b(ok\|success)\b` |
 | copy mode / 搜索里没有高亮 | 设计如此：这两个覆盖层有自己的配色，关键词高亮会让位 |
 | 改了规则但没变 | 配置热重载 `Ctrl+Shift+R`；若改的是 `keyword_rules`，重载即生效 |
-| 怀疑影响性能 | 只对“要重绘的行”跑正则，静态画面零开销；实测 4000 行刷屏开关高亮 CPU 无差异 |
+| 怀疑影响性能 | 只在画面变化时对“要重绘的行”跑正则，静态画面零开销；规则多时注意 `\b`/lookaround 的开销，见第 9 节 |
 
 ## 8. 完整可粘贴配置
 
@@ -189,3 +189,34 @@ config.keys = {
 
 return config
 ```
+
+## 9. 性能：双引擎与规则规模
+
+每条规则在加载时编译两次：`fancy-regex`（保底，支持 lookaround/反向引用）和
+`regex` crate（DFA，快）。**能被 regex crate 编译的规则自动走快引擎**，
+否则退回 fancy-regex，语义完全不变。
+
+想确认哪些规则走了慢引擎（调试时很有用）：
+
+```bash
+WEZTERM_LOG=config=debug wezterm ls-fonts 2>&1 | grep "stays on fancy-regex"
+```
+
+实测（60 行混合日志一屏全量重绘，release 构建）：
+
+| 规则集 | 改造前（全 fancy） | 双引擎后 |
+|---|---|---|
+| 内置 8 条 | 8.3 ms | 0.1 ms |
+| 内置 8 + 扩展 99 条 | **89 ms** | **9.0 ms** |
+
+99 条扩展里 94 条走快引擎，13 条留在 fancy（都是用了 lookbehind 的：
+`x-cmd`、`x-path-*`、`x-flag`、`x-port`、`x-version`、`x-ls-perm`、`x-redirect`、
+`x-prompt`、`x-sudo-hint`、`x-hex`、`x-ipv6`、`x-env-name`），其中 `x-cmd` 一条
+就占慢引擎成本的一半。**规则数量本身不是问题，`\b` 和 lookaround 才是**：
+同一个交替 `(?i)(?:starting|started|…)` 是 0.06 µs，加上 `\b` 变 8.29 µs。
+
+自己写规则时的建议：
+
+- 能用 `\bword\b` 别用 lookbehind（`\b` 现在也会走快引擎）。
+- 确实需要 lookbehind 时，尽量让词足够独特（长词），并控制条数。
+- 一条超长交替（几十个词）比拆成几条短规则更划算，但要留意灾难性回溯。

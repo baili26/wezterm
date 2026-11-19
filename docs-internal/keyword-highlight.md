@@ -84,17 +84,23 @@ echo "synced to $(git --no-pager log -1 --format='%h %s' main)"
 ```rust
 //! Keyword highlighting rules
 use crate::color::RgbaColor;   // config/src/color.rs:31，Lua 字符串自动解析（#rgb / 颜色名 / css）
-use fancy_regex::Regex;
+use fancy_regex::Regex as FancyRegex;
 use wezterm_dynamic::{FromDynamic, FromDynamicOptions, ToDynamic, Value};
+
+/// 双引擎匹配器：能交给 regex crate 的模式走 DFA，其余退回 fancy-regex
+#[derive(Clone, Debug)]
+pub struct MatchRegex {
+    fancy: FancyRegex,            // 序列化的事实来源 + 兜底
+    fast: Option<regex::Regex>,   // 能编译就说明不需要 lookaround
+}
 
 #[derive(Debug, Clone, FromDynamic, ToDynamic)]
 pub struct KeywordRule {
     /// 可选名字，便于在 Lua 里按名删除/调试
     #[dynamic(default)]
     pub name: String,
-    /// 正则；用 `fancy_regex` 包装，支持 lookaround/backreference
-    #[dynamic(into = "RegexWrap", try_from = "RegexWrap")]
-    pub regex: Regex,
+    /// 正则；`MatchRegex` 自己实现了 FromDynamic/ToDynamic，Lua 侧仍是字符串
+    pub regex: MatchRegex,
     /// 前景色，None = 保持终端原色
     #[dynamic(default)]
     pub fg: Option<RgbaColor>,      // Lua: fg = '#ff5555' / 'Red'
@@ -108,17 +114,22 @@ pub struct KeywordRule {
     #[dynamic(default)]
     pub underline: bool,
 }
-
-struct RegexWrap(Regex);   // 与 wezterm-surface/src/hyperlink.rs:64-97 同构
-impl FromDynamic for RegexWrap { /* Regex::new(&s) */ }
-impl ToDynamic for RegexWrap { /* regex.to_string() */ }
 ```
 
-> 说明 1：上游 `wezterm-surface/src/hyperlink.rs` 里的 `RegexWrap` 是私有的。**不把它改成 `pub`**（会增加与上游的冲突面），而是在 `config/src/keyword.rs` 里放一份 10 行的同构包装。`config/Cargo.toml` 需加 `fancy-regex.workspace = true`（workspace 已在 `Cargo.toml:91` 定义为 0.14；`mux`、`termwiz` 都是这么引的）。feature 由 workspace 统一（`wezterm-surface` 的 `std` feature 会打开 `fancy-regex/std`+`perf`+`unicode`），`config` 不必单独开。
+> 说明 1：`config/Cargo.toml` 需同时加 `fancy-regex.workspace = true` 和 `regex.workspace = true`
+> （workspace 定义在 `Cargo.toml:91` / `Cargo.toml:184`；`mux`、`termwiz`、`wezterm-gui` 都是这么引的）。
 >
 > 说明 2：`RgbaColor` 已实现 `#[dynamic(try_from = "String")]`（`config/src/color.rs:31-36`），所以 `fg = '#ff5555'` 与 `fg = 'Orange'` 都能解析；转 `ColorAttribute` 用现成的 `From<ColorSpec>`（`config/src/color.rs:107`）。
 >
 > 说明 3：`Option<T>` 的 `FromDynamic` 已实现（`wezterm-dynamic/src/fromdynamic.rs:91`），字段留空即 `None`。
+>
+> 说明 4（双引擎的由来）：`fancy-regex` 把 `\b`、lookaround 都判为 "hard"
+> （`fancy-regex-0.14.0/src/lib.rs:1576` 的 `Assertion::is_hard()`），只要出现就整条
+> 退回 PikeVM 回溯解释器，比 regex crate 的 DFA 慢 30~100 倍。实测同一交替：
+> `(?i)(?:starting|started|…)` 0.06 µs，加 `\b` 后 8.29 µs。而绝大多数关键词规则
+> 只用 `\b`，完全可以交给 regex crate。于是编译期同时尝试两个引擎，
+> `regex::Regex::new()` 成功就用它，失败（lookaround / 反向引用）才用 fancy。
+
 
 在 `config/src/config.rs` 的 `Config` 结构体中加两个字段（紧跟 `hyperlink_rules` 附近，减少上下文漂移）：
 
@@ -184,18 +195,21 @@ pub fn apply_keyword_rules(rules: &[KeywordRule], line: &mut Line) {
     // 注意：as_str() 对压缩行返回借用，必须先 into_owned，否则后面拿 &mut 会冲突
     let text = line.as_str().into_owned();      // wezterm-surface/src/line/line.rs:631
 
-    // 1) 逐条规则 find_iter 收集 (byte_range, rule_idx)；跳过零宽匹配；
-    //    fancy_regex 返回 Err 时忽略该条（与 hyperlink.rs:187-215 同策略）
+    // 1) 逐条规则 find_ranges(text, &mut ranges) 收集 (byte_range, rule_idx)；
+    //    零宽匹配已被 MatchRegex 过滤；fancy_regex 返回 Err 时该条到此为止
+    //    （与 hyperlink.rs:187-215 同策略）
     // 2) 用 line.visible_cells() 一次遍历，边累加 byte 偏移边记录
     //    (byte_start, byte_len, cell_index, width)。这是最稳的映射方式：
     //    as_str() 正是按 visible_cells() 顺序拼接的（line.rs:631-641），
     //    而 cell_index 直接给出原始下标（双宽字符的占位空格在 VecStorage 里
     //    是独立 cell，见 vecstorage.rs:110-112 的 CellRef 实现）
-    // 3) 规则按列表顺序后写覆盖先写：同一 cell 取「最后一条命中规则」
-    // 4) 落到 cells_mut_for_attr_changes_only()（copy.rs:1468 同款；会自动
+    // 3) spans 按 byte_start 有序，用 partition_point 跳到第一个可能重叠的
+    //    span，匹配很短时避免整行重扫
+    // 4) 规则按列表顺序后写覆盖先写：同一 cell 取「最后一条命中规则」
+    // 5) 落到 cells_mut_for_attr_changes_only()（copy.rs:1468 同款；会自动
     //    coerce 成 VecStorage）：对 cell_index..cell_index+width 的每个 cell
     //    （含双宽占位）设置属性
-    // 5) 只改属性不改文本；未命中 cell 保持原样
+    // 6) 只改属性不改文本；未命中 cell 保持原样
 }
 ```
 
@@ -480,3 +494,53 @@ printf '20261113-local\n' > .tag                # 可选：覆盖版本号（.ta
 
 - 可选：本机日常使用前，把 `~/.cargo/bin` 加进 PATH（或在 shell profile 里 source `scripts/dev-env.sh`），否则 `cargo`/`wezterm` 新构建不在 PATH 上。
 - 若要全新机器重建 sysroot：`scripts/fetch-dev-deps.sh`（会把 .deb 缓存到 `~/.local/wezterm-sysroot/debs`）。
+
+## 十、双引擎匹配（2026-11-19）
+
+问题：规则一多就慢。实测 60 行日志一屏全量重绘，内置 8 条 + 扩展 99 条约
+**89 ms**，滚动会掉帧。定位到根因不是规则数量，而是 `fancy-regex` 的
+`Assertion::is_hard()`（`fancy-regex-0.14.0/src/lib.rs:1576`）把 `\b`、lookaround
+都判为 hard，整条规则因此放弃 regex crate 的 DFA、退回 PikeVM 回溯解释器。
+同一个交替 `(?i)(?:starting|started|…)`：不带 `\b` 是 0.06 µs，带 `\b` 是 8.29 µs。
+
+做法：`config/src/keyword.rs` 用 `MatchRegex` 取代原来的 `RegexWrap`，
+加载时编译两个引擎：
+
+```rust
+pub struct MatchRegex {
+    fancy: FancyRegex,          // 永远存在：序列化来源 + 兜底
+    fast: Option<regex::Regex>, // Some = 该模式不需要 lookaround
+}
+```
+
+`regex::Regex::new()` 本身会拒绝 lookaround/反向引用，所以“编译成功”就等价于
+“语义上可以安全地走快引擎”。`find_ranges()` 按 `fast` 是否存在分发；
+`FromDynamic`/`ToDynamic` 手工实现（Lua 侧仍是一个字符串），`config/Cargo.toml`
+加 `regex.workspace = true`。
+
+`wezterm-gui/src/keywordhighlight.rs` 同步改成 `rule.regex.find_ranges(&text, &mut ranges)`，
+并把「每条规则的每个匹配都扫一遍整行 spans」改成按 `byte_start` 二分
+（`partition_point`）跳到第一个可能重叠的 span。
+
+结果：
+
+| 规则集 | 改造前 | 双引擎后 |
+|---|---|---|
+| 内置 8 条 | 8.3 ms/屏 | 0.1 ms/屏 |
+| 内置 8 + 扩展 99 条 | 89 ms/屏 | **9.0 ms/屏** |
+
+107 条中 94 条走快引擎，13 条留在 fancy（全部是用了 lookbehind 的规则），
+这 13 条独占 7.5 ms，其中 `x-cmd` 一条 2.5 ms。检查方式：
+`WEZTERM_LOG=config=debug wezterm ls-fonts 2>&1 | grep "stays on fancy-regex"`。
+
+新增测试（`config/src/keyword.rs`）：
+
+- `engine_selection`：`\b` 模式必须走快引擎；lookbehind / 反向引用必须留在 fancy。
+- `both_engines_agree`：4 种规则形态 × 5 个样本，两个引擎返回的匹配字节区间逐一相同。
+
+回归：`cargo test -p config keyword` 7 passed；`cargo test -p wezterm-gui keyword`
+7 passed；`cargo +nightly fmt --all -- --check` 干净；Xvfb 逐像素比对显示颜色落点
+与改造前完全一致；4000 行刷屏 CPU 采样开/关为 535 / 523 ticks（6 秒），无可测差异。
+
+后续可选：per-line 匹配结果缓存（`LfuCache<(line_hash, rules_generation), Vec<(usize, usize)>>`，
+模式同 `line_state_cache`），用于把滚动时的重复行降到接近零开销。
