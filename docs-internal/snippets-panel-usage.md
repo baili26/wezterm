@@ -95,7 +95,7 @@ config.keys = {
 | 键 | 作用 |
 |---|---|
 | `Ctrl+N` | 用**当前选区**新建片段（先在面板里填标题） |
-| `Ctrl+E` | 用 `$EDITOR` 在右侧 split 打开选中的片段文件（面板自动关闭） |
+| `Ctrl+E` | 用 `$EDITOR` 在右侧 split 打开选中的片段文件（面板自动关闭；编辑器退出后该 pane 也自动关闭，见 `edit_exit_behavior`） |
 | `Ctrl+D` | 移到 `.trash/`（按 `y` 确认） |
 | `Ctrl+T` | 逐项编辑元数据：title → tags → desc → pin → danger |
 | `Ctrl+R` | 重新扫描目录（外部改过文件后按这个） |
@@ -324,6 +324,7 @@ vim $|$
 | 中文标题列宽对不齐 | 已按显示宽度（CJK=2）处理；若仍异常请截图 |
 | 插入后粘贴出 `^[[D` | 目标程序不解析方向键（如 `cat > file` 读 stdin）。关掉 `placeholder` 或避开这种场合 |
 | `Ctrl+E` 打不开编辑器 | 需要设置 `$EDITOR`；没设时用 `vi` |
+| 编辑器退出后 pane 不关 | `snippet_panel.edit_exit_behavior` 被设成了 `'Global'`（跟随全局 `exit_behavior`，如 `'Hold'`）或 `'Hold'`。默认 `'Close'` 会直接关掉 |
 | 面板开着不能拖选终端文本 | 模态独占鼠标是刻意的。先在面板里拖选预览区，或关掉面板再选 |
 | 打开面板后写配置报 `SnippetFooter variant` | `footer` 值要首字母大写：`'Hidden'` / `'Short'` / `'Full'` |
 | 桌面通知不自动消失 | 部分通知守护进程不遵守 timeout。默认已关闭桌面通知 |

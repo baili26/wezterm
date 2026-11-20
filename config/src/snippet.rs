@@ -102,6 +102,48 @@ pub struct SnippetPanelConfig {
     /// `Ctrl+H` cycles through the three at runtime.
     #[dynamic(default)]
     pub footer: SnippetFooter,
+
+    /// What happens to the `Ctrl+E` editor pane once the editor exits.
+    ///
+    /// `'Close'` (the default) closes it immediately, even when the global
+    /// `exit_behavior` is `'Hold'`; `'Global'` hands the decision back to
+    /// `exit_behavior` (so `'Hold'` keeps the pane with an exit banner);
+    /// `'Hold'`/`'CloseOnCleanExit'` apply that behavior regardless of the
+    /// global setting.
+    #[dynamic(default)]
+    pub edit_exit_behavior: SnippetEditExitBehavior,
+}
+
+/// What happens to the `Ctrl+E` editor pane once the editor exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromDynamic, ToDynamic)]
+pub enum SnippetEditExitBehavior {
+    /// Use the global `exit_behavior` config.
+    Global,
+    /// Always close the pane.
+    Close,
+    /// Close the pane unless the editor exited non-zero.
+    CloseOnCleanExit,
+    /// Always hold the pane open.
+    Hold,
+}
+
+impl Default for SnippetEditExitBehavior {
+    fn default() -> Self {
+        Self::Close
+    }
+}
+
+impl SnippetEditExitBehavior {
+    /// The `WEZTERM_EXIT_BEHAVIOR` hint to put in the editor command's
+    /// environment.  `None` means "don't override, use the global setting".
+    pub fn env_hint(&self) -> Option<&'static str> {
+        match self {
+            Self::Global => None,
+            Self::Close => Some("Close"),
+            Self::CloseOnCleanExit => Some("CloseOnCleanExit"),
+            Self::Hold => Some("Hold"),
+        }
+    }
 }
 
 fn default_snippet_panel_width() -> f32 {
@@ -182,6 +224,7 @@ impl Default for SnippetPanelConfig {
             placeholder: true,
             preview_meta: true,
             footer: SnippetFooter::default(),
+            edit_exit_behavior: SnippetEditExitBehavior::default(),
         }
     }
 }
@@ -194,5 +237,46 @@ impl SnippetPanelConfig {
             Some(dir) => dir.clone(),
             None => crate::CONFIG_DIR.join("snippets"),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use wezterm_dynamic::FromDynamic;
+
+    #[test]
+    fn edit_exit_behavior_defaults_to_close() {
+        let cfg = SnippetPanelConfig::default();
+        assert_eq!(cfg.edit_exit_behavior, SnippetEditExitBehavior::Close);
+        assert_eq!(cfg.edit_exit_behavior.env_hint(), Some("Close"));
+    }
+
+    #[test]
+    fn edit_exit_behavior_from_lua() {
+        let parse = |s: &str| {
+            SnippetEditExitBehavior::from_dynamic(
+                &wezterm_dynamic::Value::String(s.to_string()),
+                Default::default(),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(parse("Global"), SnippetEditExitBehavior::Global);
+        assert_eq!(parse("Close"), SnippetEditExitBehavior::Close);
+        assert_eq!(
+            parse("CloseOnCleanExit"),
+            SnippetEditExitBehavior::CloseOnCleanExit
+        );
+        assert_eq!(parse("Hold"), SnippetEditExitBehavior::Hold);
+
+        assert_eq!(parse("Global").env_hint(), None);
+        assert_eq!(parse("Hold").env_hint(), Some("Hold"));
+
+        assert!(SnippetEditExitBehavior::from_dynamic(
+            &wezterm_dynamic::Value::String("nonsense".to_string()),
+            Default::default(),
+        )
+        .is_err());
     }
 }

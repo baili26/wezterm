@@ -37,7 +37,7 @@ config.keys = {
 | `Enter` | 插入（不执行），关闭面板 |
 | `Ctrl+Enter` | 插入并回车执行（`danger` 片段 / 含填充位片段会降级为只插入） |
 | `Ctrl+N` | 新建片段：先取选区当正文，再在面板里输入标题 |
-| `Ctrl+E` | 右侧 split 用 `$EDITOR` 打开该片段文件，**并关闭面板** |
+| `Ctrl+E` | 右侧 split 用 `$EDITOR` 打开该片段文件，**并关闭面板**；编辑器退出后该 pane 自动关闭（`edit_exit_behavior` 可改） |
 | `Ctrl+Alt+O` | 再按一次关闭面板（toggle） |
 | `Ctrl+D` | 移到 `.trash/`（需按 `y` 确认） |
 | `Ctrl+T` | 逐项编辑元数据（title → tags → desc → pin → danger） |
@@ -178,6 +178,7 @@ config.snippet_panel = {
   preview_wrap = false,  -- 预览是否软折行（Alt+W 临时切换）
   enable_trash = true,   -- Ctrl+D 是否可用
   placeholder = true,    -- 是否启用单行 `$|$` 填充位
+  edit_exit_behavior = 'Close', -- Ctrl+E 的编辑器 pane 退出后：'Close' / 'Global' / 'Hold' / 'CloseOnCleanExit'
 }
 ```
 
@@ -190,6 +191,43 @@ config.snippet_panel.bg = '#33000000'   -- 半透明黑（ARGB）
 字体用终端自己的字体与字号（不再借用命令面板的更大字号），所以面板里的列宽
 和终端文本对得上。尺寸按**窗口像素尺寸 ÷ 单元格尺寸**算出来，再以字符为单位居中，
 不会出现右侧顶到窗口边缘。
+
+### 编辑 pane 的退出行为
+
+`Ctrl+E` 的 pane 默认在编辑器退出后**直接关闭**，即使全局设了
+`exit_behavior = 'Hold'`。取值：
+
+| `edit_exit_behavior` | 效果 |
+|---|---|
+| `'Close'`（默认） | 编辑器退出即关，不看全局设置 |
+| `'Global'` | 交回全局 `exit_behavior`；`Hold` 下会停住并显示 `This message is shown because exit_behavior="Hold"` |
+| `'Hold'` | 无论如何都停住（全局是 `Close` 时也一样） |
+| `'CloseOnCleanExit'` | 干净退出才关，非 0 退出停住 |
+
+实现是 `LocalDomain::spawn_pane`（`mux/src/domain.rs`）读取命令环境里的内部变量
+`WEZTERM_EXIT_BEHAVIOR`，把它转成 `LocalPane` 的 per-pane 覆盖
+（`mux/src/localpane.rs` 的 `set_exit_behavior_override`），随后**从子进程环境里
+删掉**这个变量，所以编辑器（以及它里面再启动的 wezterm）看不到它。
+pty 读线程启动时会快照该值，因此覆盖必须在 `Mux::add_pane` 之前设置。
+
+`Alt+Shift+K` 那类 pane 之所以能干净退出，不是绕过了 Hold，而是命令自己执行了
+`wezterm cli kill-pane --pane-id $WEZTERM_PANE`。新的约定让同一件事不必依赖
+`wezterm cli`，Lua 里也能用：
+
+```lua
+wezterm.action.SplitPane {
+  direction = 'Right',
+  command = {
+    args = { 'bash', '-c', cmd },
+    set_environment_variables = { WEZTERM_EXIT_BEHAVIOR = 'Close' },
+  },
+}
+```
+
+限制：只对本地域生效（`RemoteSshDomain` 的 `LocalPane` 包装的是本地 ssh 会话，
+提示会被原样放进远端环境但没有消费者，行为和以前一样）；并且全局
+`config.set_environment_variables` 在 `apply_cmd_defaults` 里更晚应用，
+同名变量会覆盖掉这个提示。
 
 ---
 
@@ -208,6 +246,8 @@ config.snippet_panel.bg = '#33000000'   -- 半透明黑（ARGB）
 | `wezterm-gui/src/termwindow/mod.rs` | `ShowSnippetPalette` 分支挂 modal |
 | `wezterm-gui/src/commands.rs` | `CommandDef` + 默认键 |
 | `wezterm-gui/src/overlay/selector.rs` | `matcher_indices()`，给命中高亮用 |
+| `mux/src/domain.rs` | `EXIT_BEHAVIOR_ENV` 提示的解析与消费（`LocalDomain::spawn_pane`） |
+| `mux/src/localpane.rs` | `LocalPane::set_exit_behavior_override`，per-pane 退出行为 |
 
 `ListPreviewModal<S: ListPreviewSource>` 是通用的，片段只是第一个实现；以后做
 告警列表或 AI 上下文选择器可以直接复用（实现 `source_name` / `generation` /
@@ -251,7 +291,8 @@ cargo +nightly fmt --all -- --check
 3. `Ctrl+Enter` 对普通片段会执行；对 `danger: true` 只插入；
 4. `Ctrl+N` → 输入标题 → 文件出现在 `inbox/`，列表立刻多一条并选中它；
 5. `Ctrl+D` → `y` → 文件移到 `.trash/<相对路径>`，列表立刻少一条；
-6. `Ctrl+E` → 面板消失，右侧出现 `vim <片段路径>`；
+6. `Ctrl+E` → 面板消失，右侧出现 `vim <片段路径>`；`:q` 后 split 自动消失，
+   **不出现** `This message is shown because exit_behavior="Hold"`；
 7. `Ctrl+T` 依次改 title/tags/desc/pin/danger 时，未知字段与注释保留；
 8. 方向键 ×20、PgUp/PgDn ×5、Home/End、空结果下按键：日志无 `panicked`；
 9. 鼠标点列表行 → 选中条移动；拖过预览区 → 高亮保持；右键 → 写入 clipboard 并清除高亮；

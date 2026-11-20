@@ -1010,14 +1010,31 @@ impl ListPreviewSource for SnippetSource {
                     args.push("vi".to_string());
                 }
                 let path = snippet.abs_path.display().to_string();
-                // Back to the plain editor invocation: wrapping it in `sh -c`
-                // made the pane inherit a mangled argv and print garbage.
-                // `exit_behavior = "Hold"` handling is left to the user.
+                // Plain editor invocation: wrapping it in `sh -c` made the
+                // pane inherit a mangled argv and print garbage.
                 args.push(path);
+                // Let the editor pane close itself when the editor exits even
+                // under a global `exit_behavior = "Hold"`; the env hint is
+                // consumed by `LocalDomain::spawn_pane`.
+                // `snippet_panel.edit_exit_behavior` can put it back under the
+                // global setting ('Global') or force Hold.
+                let set_environment_variables = ctx
+                    .term_window
+                    .config
+                    .snippet_panel
+                    .edit_exit_behavior
+                    .env_hint()
+                    .map(|hint| {
+                        let mut env = std::collections::HashMap::new();
+                        env.insert(mux::domain::EXIT_BEHAVIOR_ENV.to_string(), hint.to_string());
+                        env
+                    })
+                    .unwrap_or_default();
                 ctx.term_window.spawn_command(
                     &config::keyassignment::SpawnCommand {
                         args: Some(args),
                         cwd: Some(self.dir.clone()),
+                        set_environment_variables,
                         ..Default::default()
                     },
                     crate::spawn::SpawnWhere::SplitPane(mux::tab::SplitRequest {

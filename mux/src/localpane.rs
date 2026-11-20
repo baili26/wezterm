@@ -133,6 +133,8 @@ pub struct LocalPane {
     #[cfg(unix)]
     leader: Arc<Mutex<Option<CachedLeaderInfo>>>,
     command_description: String,
+    /// Overrides the global `exit_behavior` for this pane only.
+    exit_behavior_override: Mutex<Option<ExitBehavior>>,
 }
 
 #[async_trait(?Send)]
@@ -235,9 +237,11 @@ impl Pane for LocalPane {
         let is_failed_spawn = pty.is::<crate::domain::FailedSpawnPty>();
 
         if is_ssh_connecting || is_failed_spawn {
+            // These take precedence so that the connection/spawn error stays
+            // on screen regardless of any per-pane override.
             Some(ExitBehavior::CloseOnCleanExit)
         } else {
-            None
+            *self.exit_behavior_override.lock()
         }
     }
 
@@ -1067,6 +1071,15 @@ fn split_child(
 }
 
 impl LocalPane {
+    /// Override the global `exit_behavior` for this pane only.
+    ///
+    /// Call this before `Mux::add_pane`: the thread that reads the pty
+    /// snapshots the value when it starts (see `read_from_pane_pty`), and it
+    /// also feeds the `ExitBehavior::Close` fast path that removes the pane.
+    pub fn set_exit_behavior_override(&self, behavior: Option<ExitBehavior>) {
+        *self.exit_behavior_override.lock() = behavior;
+    }
+
     pub fn new(
         pane_id: PaneId,
         mut terminal: Terminal,
@@ -1101,6 +1114,7 @@ impl LocalPane {
             #[cfg(unix)]
             leader: Arc::new(Mutex::new(None)),
             command_description,
+            exit_behavior_override: Mutex::new(None),
         }
     }
 

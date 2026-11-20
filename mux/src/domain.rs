@@ -27,6 +27,28 @@ use wezterm_term::TerminalSize;
 static DOMAIN_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
 pub type DomainId = usize;
 
+/// Internal hint, carried in the command's environment: when a spawned
+/// command sets this, the resulting pane uses the named `ExitBehavior`
+/// instead of the global `exit_behavior` config.
+///
+/// It is consumed (and removed from the child's environment) by
+/// `LocalDomain::spawn_pane`.  This lets a single command opt out of a global
+/// `Hold` — e.g. the snippet palette's `$EDITOR` split — without adding a
+/// field to `SpawnCommand` and threading it through the mux protocol.
+pub const EXIT_BEHAVIOR_ENV: &str = "WEZTERM_EXIT_BEHAVIOR";
+
+fn parse_exit_behavior_hint(s: &str) -> Option<config::ExitBehavior> {
+    if s.eq_ignore_ascii_case("close") {
+        Some(config::ExitBehavior::Close)
+    } else if s.eq_ignore_ascii_case("closeoncleanexit") {
+        Some(config::ExitBehavior::CloseOnCleanExit)
+    } else if s.eq_ignore_ascii_case("hold") {
+        Some(config::ExitBehavior::Hold)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainState {
     Detached,
@@ -594,10 +616,20 @@ impl Domain for LocalDomain {
         command_dir: Option<String>,
     ) -> anyhow::Result<Arc<dyn Pane>> {
         let pane_id = alloc_pane_id();
-        let cmd = self
+        let mut cmd = self
             .build_command(command, command_dir, pane_id)
             .await
             .context("build_command")?;
+
+        // Consume the per-pane exit behavior hint before it reaches the child:
+        // it is our own contract, not something the program should see (a
+        // nested wezterm would otherwise inherit it).
+        let exit_behavior_override = cmd
+            .get_env(EXIT_BEHAVIOR_ENV)
+            .and_then(|v| v.to_str())
+            .and_then(parse_exit_behavior_hint);
+        cmd.env_remove(EXIT_BEHAVIOR_ENV);
+
         let pair = self
             .pty_system
             .lock()
@@ -629,22 +661,28 @@ impl Domain for LocalDomain {
             terminal.enable_conpty_quirks();
         }
 
+        // The override has to be in place before `Mux::add_pane`: that is
+        // where the pty reader thread starts and snapshots the value.
         let pane: Arc<dyn Pane> = match child_result {
-            Ok(child) => Arc::new(LocalPane::new(
-                pane_id,
-                terminal,
-                child,
-                pair.master,
-                Box::new(writer),
-                self.id,
-                command_description,
-            )),
+            Ok(child) => {
+                let pane = LocalPane::new(
+                    pane_id,
+                    terminal,
+                    child,
+                    pair.master,
+                    Box::new(writer),
+                    self.id,
+                    command_description,
+                );
+                pane.set_exit_behavior_override(exit_behavior_override);
+                Arc::new(pane)
+            }
             Err(err) => {
                 // Show the error to the user in the new pane
                 write!(writer, "{err:#}").ok();
 
                 // and return a dummy pane that has exited
-                Arc::new(LocalPane::new(
+                let pane = LocalPane::new(
                     pane_id,
                     terminal,
                     Box::new(FailedProcessSpawn {}),
@@ -654,7 +692,9 @@ impl Domain for LocalDomain {
                     Box::new(writer),
                     self.id,
                     command_description,
-                ))
+                );
+                pane.set_exit_behavior_override(exit_behavior_override);
+                Arc::new(pane)
             }
         };
 
@@ -728,5 +768,28 @@ impl Domain for LocalDomain {
 
     fn state(&self) -> DomainState {
         DomainState::Attached
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_exit_behavior_hint;
+    use config::ExitBehavior;
+
+    #[test]
+    fn exit_behavior_hint_parsing() {
+        assert_eq!(parse_exit_behavior_hint("Close"), Some(ExitBehavior::Close));
+        assert_eq!(parse_exit_behavior_hint("hold"), Some(ExitBehavior::Hold));
+        assert_eq!(
+            parse_exit_behavior_hint("CloseOnCleanExit"),
+            Some(ExitBehavior::CloseOnCleanExit)
+        );
+        assert_eq!(
+            parse_exit_behavior_hint("closeoncleanexit"),
+            Some(ExitBehavior::CloseOnCleanExit)
+        );
+        assert_eq!(parse_exit_behavior_hint(""), None);
+        assert_eq!(parse_exit_behavior_hint("Hold "), None);
+        assert_eq!(parse_exit_behavior_hint("nonsense"), None);
     }
 }
