@@ -342,6 +342,17 @@ pub trait Pane: Downcast + Send + Sync {
         None
     }
 
+    /// Raw fd whose writability mirrors "the child can accept more input".
+    ///
+    /// Used by the ZMODEM driver so a blocked protocol write is noticed *before*
+    /// it enters the kernel, instead of after it has taken the pane's writer
+    /// mutex and frozen the terminal.  `None` when the pane has no such fd
+    /// (SSH channels, remote panes, tmux).
+    #[cfg(unix)]
+    fn pty_master_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        None
+    }
+
     fn exit_behavior(&self) -> Option<ExitBehavior> {
         None
     }

@@ -261,31 +261,35 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
 
                     let seed = zmodem.take_seed();
                     zmodem.reset();
+                    let mut completed = false;
                     if let Some(pane_id) = pane.upgrade().map(|p| p.pane_id()) {
-                        // A trigger with no program output before it is the
-                        // peer retrying a handshake we already gave up on, so
-                        // it must not reopen a session - otherwise a cancelled
-                        // transfer traps the user in the upload prompt.
-                        if !fresh_trigger && zmodem::in_abort_cooldown(pane_id) {
-                            // The peer is still retrying a handshake we just
-                            // cancelled.  Answer with the cancel sequence
-                            // instead of starting a new session, so the pane
-                            // goes back to the shell.  No ETX: writing one
-                            // leaves the byte in the tty input queue, and the
-                            // shell echoes it as `^C` once the peer dies.
-                            log::debug!("zmodem: pane {pane_id}: ignoring retrigger");
-                            if let Some(pane) = pane.upgrade() {
-                                let mut writer = pane.writer();
-                                let _ = writer.write_all(&[0x18; 10]);
-                            }
-                            zmodem::interrupt_peer(pane_id);
+                        let (restarted, done) = start_zmodem_session(
+                            pane_id,
+                            &pane,
+                            &mut rx,
+                            &dead,
+                            mode,
+                            seed,
+                            fresh_trigger,
+                        );
+                        completed = done;
+                        if restarted {
+                            // The session found a *new* handshake while it was
+                            // swallowing the abandoned stream: run again from
+                            // that handshake instead of waiting for the pane to
+                            // produce more output.
+                            zmodem_enabled = zmodem::enabled();
                             continue;
                         }
-                        zmodem::run(pane_id, pane.clone(), &mut rx, dead, mode, seed);
                     }
-                    // lrzsz signs off with a literal `OO`; swallow it so it
-                    // does not get drawn onto the freshly restored prompt.
-                    zmodem.expect_epilogue();
+                    if completed {
+                        // lrzsz signs off with a literal `OO`; swallow it so it
+                        // does not get drawn onto the freshly restored prompt.
+                        // Only after a clean sign-off: an aborted session never
+                        // sends it, and waiting would eat the next two `O`s of
+                        // whatever the user runs.
+                        zmodem.expect_epilogue();
+                    }
                     // Pick up config changes that happened during the transfer.
                     zmodem_enabled = zmodem::enabled();
                     continue;
@@ -352,6 +356,87 @@ fn parse_buffered_data(pane: Weak<dyn Pane>, dead: &Arc<AtomicBool>, mut rx: Fil
     }
     if !actions.is_empty() {
         send_actions_to_mux(&pane, &dead, std::mem::take(&mut actions));
+    }
+}
+
+/// Start a ZMODEM session, or answer a retried handshake with a cancel.
+///
+/// Returns true when the session's tail-drain phase handed back a *new*
+/// handshake, which the caller must process instead of waiting for more output.
+///
+/// The second half of the result is true when the session ended cleanly, i.e.
+/// when the peer's `OO` epilogue is still to come.
+#[allow(clippy::too_many_arguments)]
+fn start_zmodem_session(
+    pane_id: crate::pane::PaneId,
+    pane: &Weak<dyn Pane>,
+    rx: &mut FileDescriptor,
+    dead: &Arc<AtomicBool>,
+    mode: zmodem::Mode,
+    seed: Vec<u8>,
+    fresh: bool,
+) -> (bool, bool) {
+    match start_zmodem_session_inner(pane_id, pane, rx, dead, mode, seed, fresh, 0) {
+        RestartOutcome::Restarted => (true, false),
+        RestartOutcome::Done(completed) => (false, completed),
+    }
+}
+
+/// How the recursive restarts ended.
+enum RestartOutcome {
+    /// A fresh handshake was found and a new session already ran.
+    Restarted,
+    /// No further handshake; the value says whether the last session completed.
+    Done(bool),
+}
+
+/// Recursion limit for the "new handshake found while discarding" chain, so a
+/// peer that keeps a handshake in flight cannot spin this thread forever.
+const MAX_ZMODEM_RETRIGGERS: u8 = 4;
+
+#[allow(clippy::too_many_arguments)]
+fn start_zmodem_session_inner(
+    pane_id: crate::pane::PaneId,
+    pane: &Weak<dyn Pane>,
+    rx: &mut FileDescriptor,
+    dead: &Arc<AtomicBool>,
+    mode: zmodem::Mode,
+    seed: Vec<u8>,
+    fresh: bool,
+    depth: u8,
+) -> RestartOutcome {
+    // A trigger with no program output before it is the peer retrying a
+    // handshake we already gave up on, so it must not reopen a session -
+    // otherwise a cancelled transfer traps the user in the upload prompt.
+    if !fresh && zmodem::in_abort_cooldown(pane_id) {
+        // The peer is still retrying a handshake we just cancelled.  Answer
+        // with the cancel sequence instead of starting a new session, so the
+        // pane goes back to the shell.  No ETX: writing one leaves the byte in
+        // the tty input queue, and the shell echoes it as `^C` once the peer
+        // dies.
+        log::debug!("zmodem: pane {pane_id}: ignoring retrigger");
+        if let Some(pane) = pane.upgrade() {
+            let mut writer = pane.writer();
+            let _ = writer.write_all(&[0x18; 10]);
+        }
+        zmodem::interrupt_peer(pane_id);
+        return RestartOutcome::Done(false);
+    }
+
+    let end = zmodem::run(pane_id, pane.clone(), rx, dead, mode, seed);
+    match end.retrigger {
+        Some((mode, seed, fresh)) if depth < MAX_ZMODEM_RETRIGGERS => {
+            // The discarded remainder of the old stream carried a new
+            // handshake.  Start the next session from it, but re-run the
+            // cooldown check so a bare retry is still answered with CAN.
+            log::debug!("zmodem: pane {pane_id}: new handshake found while draining leftovers");
+            start_zmodem_session_inner(pane_id, pane, rx, dead, mode, seed, fresh, depth + 1)
+        }
+        Some(_) => {
+            log::warn!("zmodem: pane {pane_id}: too many handshake restarts; leaving the stream to the parser");
+            RestartOutcome::Done(end.completed)
+        }
+        None => RestartOutcome::Done(end.completed),
     }
 }
 

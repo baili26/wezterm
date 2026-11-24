@@ -111,6 +111,29 @@ fn show_progress() -> bool {
     config::configuration().zmodem.show_progress
 }
 
+/// How many 1 KiB subpackets the upload sender may emit before waiting for the
+/// peer's acknowledgement.
+///
+/// Unbounded streaming is what `rz` advertises (buffer length 0 plus
+/// `CANOVIO`), and it is the fastest thing on the wire, but it also means the
+/// engine never looks at the reverse channel until the whole file has been
+/// written: a peer that stopped accepting data stays invisible, the pty write
+/// blocks, and the session dies in the least helpful way possible.  A bounded
+/// window costs one round trip per window (nothing on SSH) and makes such a
+/// peer visible within a window.  `upload_window_kib = 0` restores the
+/// unbounded behaviour for anyone who wants the old throughput.
+///
+/// One subpacket carries at most 1 KiB, so the byte budget and the subpacket
+/// count are the same number: `upload_window_kib` is the window in both units.
+pub(crate) fn upload_window() -> usize {
+    let kib = config::configuration().zmodem.upload_window_kib;
+    if kib == 0 {
+        usize::MAX
+    } else {
+        kib.min(usize::MAX as u64).max(1) as usize
+    }
+}
+
 pub fn resume_enabled() -> bool {
     config::configuration().zmodem.resume
 }
@@ -1482,7 +1505,7 @@ pub fn run(
     dead: &Arc<AtomicBool>,
     mode: Mode,
     seed: Vec<u8>,
-) {
+) -> session::SessionEnd {
     let handle = begin_session(pane_id);
     let session = session::Session::new(
         pane_id,
@@ -1494,7 +1517,7 @@ pub fn run(
         show_progress(),
     );
 
-    let outcome = match mode {
+    let (outcome, end) = match mode {
         Mode::Download => session.run_download(seed),
         Mode::Upload => session.run_send(seed),
     };
@@ -1579,6 +1602,8 @@ pub fn run(
     // of the user's shell prompt too.  `CSI 0 SP q` means "back to whatever
     // the user configured", i.e. `default_cursor_style`.
     emit_sync(&handle, "\x1b[0 q");
+
+    end
 }
 
 #[cfg(test)]

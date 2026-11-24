@@ -47,14 +47,29 @@ fn pair() -> (UnixStream, UnixStream) {
 /// `to_peer` is where protocol bytes are written; `from_peer` is what the
 /// receiver sends back.
 fn spawn_sender(
+    to_peer: UnixStream,
+    from_peer: UnixStream,
+    data: Vec<u8>,
+    name: &'static [u8],
+) -> std::thread::JoinHandle<anyhow::Result<()>> {
+    spawn_sender_with_window(to_peer, from_peer, data, name, usize::MAX)
+}
+
+/// Same as [`spawn_sender`], with an explicit acknowledgement window: the
+/// number of 1 KiB subpackets the sender may emit before it waits for the
+/// receiver.  `usize::MAX` streams the whole file in one frame, which is what
+/// `rz`'s nonstop advertisement allows - and what leaves the engine deaf to the
+/// reverse channel for the entire transfer.
+fn spawn_sender_with_window(
     mut to_peer: UnixStream,
     mut from_peer: UnixStream,
     data: Vec<u8>,
     name: &'static [u8],
+    window: usize,
 ) -> std::thread::JoinHandle<anyhow::Result<()>> {
     std::thread::spawn(move || {
         let mut sender = Sender::new()?;
-        sender.set_streaming_window(usize::MAX);
+        sender.set_streaming_window(window);
         sender.start_file(FileInfo::new(name, Some(Position::new(data.len() as u32))))?;
         sender.finish()?;
 
@@ -115,10 +130,37 @@ fn spawn_sender(
 }
 
 fn run_receiver(
+    from_peer: UnixStream,
+    to_peer: UnixStream,
+    dir: &std::path::Path,
+) -> anyhow::Result<(Vec<u8>, Vec<std::path::PathBuf>)> {
+    run_receiver_counting(from_peer, to_peer, dir, &mut |_| {})
+}
+
+/// Same as [`run_receiver`], but hands every chunk of wire bytes to `watch`
+/// before the engine sees it, so a test can count protocol framing (how often
+/// the sender stopped to wait for an acknowledgement).
+fn run_receiver_counting<F>(
+    from_peer: UnixStream,
+    to_peer: UnixStream,
+    dir: &std::path::Path,
+    watch: &mut F,
+) -> anyhow::Result<(Vec<u8>, Vec<std::path::PathBuf>)>
+where
+    F: FnMut(&[u8]),
+{
+    run_receiver_inner(from_peer, to_peer, dir, watch)
+}
+
+fn run_receiver_inner<F>(
     mut from_peer: UnixStream,
     mut to_peer: UnixStream,
     dir: &std::path::Path,
-) -> anyhow::Result<(Vec<u8>, Vec<std::path::PathBuf>)> {
+    watch: &mut F,
+) -> anyhow::Result<(Vec<u8>, Vec<std::path::PathBuf>)>
+where
+    F: FnMut(&[u8]),
+{
     let mut receiver = Receiver::with_flow_control(0, true)?;
     receiver.set_manual_file_accept(true);
 
@@ -136,7 +178,10 @@ fn run_receiver(
         }
         match from_peer.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => pending.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                watch(&buf[..n]);
+                pending.extend_from_slice(&buf[..n]);
+            }
             Err(_) => {}
         }
 
@@ -217,6 +262,51 @@ fn round_trip_large_payload() {
     assert_eq!(paths.len(), 1);
     let on_disk = std::fs::read(&paths[0]).unwrap();
     assert_eq!(on_disk, expected);
+}
+
+#[test]
+fn a_bounded_window_stops_the_sender_for_an_ack() {
+    // Nonstop streaming (window = MAX) puts the whole file in one frame: the
+    // only acknowledgement points are the ZFILE metadata subpacket and the
+    // single data frame carrying all of it.  A bounded window must break the
+    // file into several frames instead, which is what lets the driver notice a
+    // peer that stopped accepting data.
+    let size = 1024 * 1024;
+    let terminators = |window: usize| {
+        let (s2r_w, s2r_r) = pair();
+        let (r2s_w, r2s_r) = pair();
+        let sender = spawn_sender_with_window(s2r_w, r2s_r, payload(size), b"w.bin", window);
+
+        // `0x18 0x6b` is ZDLE + ZCRCW: a frame that waits for the receiver.
+        // ZCRCG (0x69) keeps streaming.  A pair can straddle two reads, so the
+        // previous byte is carried across chunks.
+        let mut count = 0usize;
+        let mut prev = None;
+        let dir = tempfile::tempdir().unwrap();
+        run_receiver_counting(s2r_r, r2s_w, dir.path(), &mut |chunk: &[u8]| {
+            for &b in chunk {
+                if prev == Some(0x18) && b == 0x6b {
+                    count += 1;
+                }
+                prev = Some(b);
+            }
+        })
+        .unwrap();
+        sender.join().unwrap().unwrap();
+        count
+    };
+
+    let unbounded = terminators(usize::MAX);
+    let bounded = terminators(64);
+    assert_eq!(
+        unbounded, 2,
+        "an unbounded window must be one metadata frame plus one data frame for the whole file"
+    );
+    assert!(
+        bounded >= size / (64 * 1024),
+        "a 64 KiB window must yield at least {} acknowledgement points, got {bounded}",
+        size / (64 * 1024)
+    );
 }
 
 #[test]

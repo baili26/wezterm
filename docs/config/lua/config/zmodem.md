@@ -24,6 +24,7 @@ config.zmodem = {
   upload_file_picker = 'Auto',
   accept_window_secs = 45,
   resume = false,
+  upload_window_kib = 4096,
 }
 ```
 
@@ -58,6 +59,15 @@ config.zmodem = {
 * `resume` - if a partial file from an earlier attempt is in `download_dir`,
   ask the sender to continue from where it stopped (ZRPOS) instead of starting
   over.  Off by default because it reuses an existing file.
+* `upload_window_kib` - how much data may be sent to an upload peer (`rz`)
+  before waiting for its acknowledgement, in KiB (one subpacket is 1 KiB, so
+  this is also the number of subpackets per window).  lrzsz `rz` advertises
+  nonstop I/O, which lets the whole file go out as a single uninterrupted
+  stream — and that makes a peer which stopped accepting data (a corrupt
+  subpacket, a full disk, a killed `rz`) invisible until every byte has been
+  written.  A bounded window costs one round trip per window, which is nothing
+  over SSH, and turns that into one round trip of delay.  `0` restores the old
+  unbounded behaviour (fastest on paper, but it cannot notice a dead peer).
 
 ```lua
 local wezterm = require 'wezterm'

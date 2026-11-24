@@ -397,6 +397,11 @@ impl Pane for LocalPane {
 
     fn mouse_event(&self, event: MouseEvent) -> Result<(), Error> {
         Mux::get().record_input_for_current_identity();
+        if crate::zmodem::is_active(self.pane_id) {
+            // While a transfer owns the byte stream, mouse reports would be
+            // injected into the protocol as `\x1b[M...` and corrupt it.
+            return Ok(());
+        }
         self.terminal.lock().mouse_event(event)
     }
 
@@ -557,6 +562,13 @@ impl Pane for LocalPane {
         {
             None
         }
+    }
+
+    #[cfg(unix)]
+    fn pty_master_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        // The pty master doubles as the input fd for a local or ssh pane: it is
+        // writable exactly when the child's input buffer has room.
+        self.pty.lock().as_raw_fd()
     }
 
     fn get_foreground_process_info(&self, policy: CachePolicy) -> Option<LocalProcessInfo> {

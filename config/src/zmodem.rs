@@ -105,6 +105,23 @@ pub struct ZmodemConfig {
     /// because it reuses an existing file rather than writing a fresh one.
     #[dynamic(default)]
     pub resume: bool,
+
+    /// How much data may be sent to an upload peer before waiting for its
+    /// acknowledgement, in KiB.  One subpacket is 1 KiB, so this is also the
+    /// number of subpackets per window.
+    ///
+    /// ZMODEM allows a sender to stream a whole file without ever waiting when
+    /// the receiver advertises nonstop I/O (lrzsz `rz` does: buffer length 0
+    /// plus `CANOVIO`).  `zmodem2` cannot sample the reverse channel while a
+    /// file read is outstanding, so streaming without a window means a peer
+    /// that has stopped accepting data - a corrupt subpacket, a full disk, a
+    /// killed `rz` - is invisible until the whole file has been written out.
+    /// A bounded window costs one round trip per window (negligible on SSH)
+    /// and turns that into one round trip of latency.
+    ///
+    /// `0` restores the old unbounded behaviour (fastest, but deaf).
+    #[dynamic(default = "default_zmodem_upload_window_kib")]
+    pub upload_window_kib: u64,
 }
 
 fn default_zmodem_timeout_secs() -> u64 {
@@ -117,6 +134,10 @@ fn default_zmodem_upload_wait_secs() -> u64 {
 
 fn default_zmodem_accept_window_secs() -> u64 {
     45
+}
+
+fn default_zmodem_upload_window_kib() -> u64 {
+    4096
 }
 
 impl Default for ZmodemConfig {
@@ -132,6 +153,7 @@ impl Default for ZmodemConfig {
             upload_file_picker: UploadFilePicker::default(),
             accept_window_secs: default_zmodem_accept_window_secs(),
             resume: false,
+            upload_window_kib: default_zmodem_upload_window_kib(),
         }
     }
 }
@@ -153,6 +175,30 @@ mod tests {
         assert_eq!(cfg.upload_file_picker, UploadFilePicker::Auto);
         assert_eq!(cfg.accept_window_secs, 45);
         assert!(!cfg.resume);
+        assert_eq!(cfg.upload_window_kib, 4096);
+        assert_ne!(
+            cfg.upload_window_kib, 0,
+            "an unbounded upload window makes the sender deaf to the peer"
+        );
+    }
+
+    #[test]
+    fn upload_window_is_configurable() {
+        let value = Value::Object(
+            vec![("upload_window_kib".to_dynamic(), 512u64.to_dynamic())]
+                .into_iter()
+                .collect(),
+        );
+        let cfg = ZmodemConfig::from_dynamic(&value, Default::default()).unwrap();
+        assert_eq!(cfg.upload_window_kib, 512);
+
+        let value = Value::Object(
+            vec![("upload_window_kib".to_dynamic(), 0u64.to_dynamic())]
+                .into_iter()
+                .collect(),
+        );
+        let cfg = ZmodemConfig::from_dynamic(&value, Default::default()).unwrap();
+        assert_eq!(cfg.upload_window_kib, 0, "0 must stay expressible");
     }
 
     #[test]
