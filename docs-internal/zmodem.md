@@ -91,12 +91,31 @@ loop {
 | `zmodem2::Sender` → `rz -b` | 3 MiB 随机数据，字节完全一致 |
 
 配置：`Receiver::with_flow_control(0, true)`（广播 CANOVIO + 零缓冲，
-远端 `sz` 才会连续流式发送；否则每 1 KiB 一个往返），
-`Sender::set_streaming_window(usize::MAX)`（反方向同理）。
+远端 `sz` 才会连续流式发送；否则每 1 KiB 一个往返）。
+上传方向**不能**用 `Sender::set_streaming_window(usize::MAX)`，见下一节。
 
 `set_manual_file_accept(true)` 模式也跑通（`FileStarted` 里调 `accept_file_at(0)`），
 这条路径让"名字不合规/磁盘写不进"可以干净地用 `skip_file()` 拒绝，
 而不是在引擎已经把 ZRPOS 发出去之后才发现。
+
+### 上传必须有界窗口（2026-11-24，380 MiB 卡死事故的根因之一）
+
+`zmodem2::Sender` 在发出 `ReadFile` 请求到收到 `submit_file` 之间**完全不解析反向
+通道**（`sender.rs:244-247`：`pending_request.is_some()` 时 `submit_wire` 直接
+`break`）。而 `rz` 的 ZRINIT 实测是 `**\x18B0100000023be50`——缓冲长度 0 +
+CANOVIO，于是 `usize::MAX` 的窗口让**整个文件变成一个 frame**，只有一个 ZDATA 头、
+几万到几十万个 ZCRCG，最后才有一个 ZCRCW。后果：整个传输期间对端的 ZACK /
+ZRPOS / ZCAN / ZFIN 一个都读不到；对端停止读取（子包校验失败要 ZRPOS、磁盘满、
+被 kill）时我们毫无察觉，继续往里灌。
+
+lrzsz 的 `sz` 不是这么干的：它每发一个子包就 `rdchk()` 采样一次反向流（规范 §9.1
+"Full Streaming with Sampling"）。引擎做不到这件事，所以驱动层改用**有界窗口**：
+默认 `upload_window_kib = 4096`，每 4 MiB 等一次 ZACK。代价是每 4 MiB 一个往返
+（SSH 上可以忽略），换来的是对端异常在一个窗口内就能被发现。
+
+`mux/tests/zmodem_roundtrip.rs::a_bounded_window_stops_the_sender_for_an_ack`
+固定这条行为：窗口为 `usize::MAX` 时全文件只有 2 个 ZCRCW（ZFILE + 唯一的数据
+frame），64 KiB 窗口时至少 16 个。
 
 ### 驱动循环里三条必须遵守的顺序规则
 
@@ -161,6 +180,19 @@ GUI 浮层，所以 `tmux -CC` 下同样能用。设计要点：
   * 只在两个地方调用：上传倒计时到点、以及会话结束后的重发握手冷却期。
   没有其它 `kill`/`signal` 调用。
 
+  `2026-11-24` 新增的第二条路径**不发信号**，只是给驱动一个"别把 GUI 拖死"的出口：
+
+  * 每次协议写之前，若 `Pane::pty_master_fd()` 给出了 pty master 的 fd（本地 pane 与
+    `wezterm ssh` 域都有；`WrappedSshPty` 返回 `None`），先 `poll(POLLOUT)` 最多
+    `WAIT_WRITABLE`（10 s）。不可写就直接失败——**此时还没拿 writer 锁**，pane 完好，
+    用户看到的是 `the peer stopped reading its input; transfer cancelled`。
+  * 若写已经进了 kernel 才卡住（`write(2)` 无法取消），它会一直握着 pane 的 writer
+    互斥锁——终端模型与每一次按键共享这把锁，整个 GUI 会冻住。这种情形下驱动
+    `pane.kill()` 结束该 pane 的子进程：pty slave 关闭后阻塞的写以 EIO 返回，锁被释放。
+    日志是 `write to pane N blocked for …s; ending the pane so the terminal cannot hang`。
+
+  两条都只影响正在传输的那个 pane。
+
 ## 6. 边界与已知限制
 
 | 场景 | 状态 | 说明 |
@@ -171,6 +203,7 @@ GUI 浮层，所以 `tmux -CC` 下同样能用。设计要点：
 | `SSHMUX:` / unix domain（mux server 侧 pane） | ❌ | 原始字节只存在于 server 端；已在 server 侧硬关闭（见 §5），GUI 端是 `ClientPane`（`reader() == None`）拿不到字节 |
 | 文件 > 4 GiB | ❌ | `zmodem2::Position` 是 `u32`；会被拒绝并提示 |
 | 目录传输 | ❌ | ZMODEM 没有目录概念（trzsz 才有） |
+| 上游 `zmodem2` 采样反向流 | ❌ | 引擎在 `pending_request` 期间不解析反向通道（`sender.rs:244-247`）；只能靠驱动层的有界窗口兜底，见 §3 |
 
 ## 7. 实测记录（2026-11-17，本机，Xvfb 无 WM）
 
@@ -284,6 +317,56 @@ t=161.0s 十次 CAN + 十次 BS，进程退出
   也无反应——`rz` 这时已把 tty 设成 raw，ETX 不再产生 SIGINT。
 - 只有真 `SIGINT` 有效：`kill(pid, SIGINT)` 后 0.1 秒内退出。
 
+### 第六轮（2026-11-24）：380 MiB 上传卡死
+
+用户实测：pane 里 `ssh` 到远端跑 `rz`，选 398,622,992 B 的文件，进度行停在
+`zmodem: 2.1.331 - 0% of 380.2 MiB - 7.8 MiB/s`，约一分钟以后吐乱码、pane 死 / ssh 丢；
+有时 pane 死有时不死。≤ 50 MB 的上传全部正常。
+
+三条尺寸相关的缺陷叠加，全部在**驱动层**（`zmodem2` 本身不需要 patch）：
+
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| 卡住不动，对端早已停止接收也毫无察觉 | 上传窗口 `usize::MAX` + 引擎在 `pending_request` 期间不读反向通道 → 整个文件一个 frame，ZACK/ZRPOS/ZCAN 全都读不到 | `upload_window_kib`（默认 4096）有界窗口 |
+| 无论对端是否正常，约 60 秒后必被判定为超时 | `stalled()` 只看读方向；上传是纯写流，对端按协议本就静默 | 两个方向任一有进展就不算 stall（`last_wire_write` 终于被用上；读文件也算进展） |
+| 超时后 `rz` 永远停在 raw 模式、屏幕上出现乱码 | 上传的 stalled 分支只入队 `abort()`，没发取消序列；随后残余二进制交回 VT 解析器 | 所有上传中止路径统一走 `abort_upload()`（abort + flush CAN）；会话结束后 `drain_after_abort()` 在 2 s / 4 MiB 内吞掉残留，并保留期间出现的新握手交给检测器 |
+| pane 有时永久冻死、GUI 卡住 | 每次 `WriteWire` 起一个线程（380 MiB ≈ 39 万次），写超时后丢弃线程，而它持有 pane writer 锁 | 一个会话一个常驻写线程；写超时改为结束该 pane（pty slave 关闭 → 阻塞写返回 EIO → 锁释放） |
+| 传输中动鼠标把协议流写坏 | `LocalPane::mouse_event` 没有像 `key_down`/`send_paste` 那样被 ZMODEM 拦截 | 传输期间忽略鼠标事件 |
+| 进度行看不出卡在哪 | 只有百分比与速率 | 在输出停滞 ≥2 s 时追加 ` - write blocked for Ns` |
+
+回归测试：`stall_counts_progress_in_either_direction`、
+`a_wedged_write_is_reported_instead_of_hanging`、
+`writes_are_delivered_in_order_over_one_thread`、
+`a_bounded_window_stops_the_sender_for_an_ack`、`upload_window_is_configurable`。
+
+### 第七轮（2026-11-25）：本地 `rz` 正常、经 `ssh` 仍失败的真根因
+
+第六轮修完，本地 pty + 真 `rz` 400 MiB 全部通过，但用户经 `ssh` 到 10.95.22.31 仍然
+在 0–65% 之间掉线（`the peer stopped reading its input for 10s`，或 60 s 静默超时）。
+用旁路探针（`/tmp/zmsshprobe`：本地 pty + 交互式 `ssh`，完全不经 wezterm）复现，确认
+**与 wezterm 无关**，是 `ssh` 客户端的转义扫描：
+
+> `ssh` 在把 pty 上的字节转发给远端之前，会扫描 **行首**（`\n` 之后）的转义字符
+> `~`。`\n~.` 直接断连，`\n~^Z` 挂起本地 ssh。ZMODEM 的 `ZDLE_TABLE` 只转义 CR
+> （0x0d），**不转义 LF**，所以 payload 里的任意 `\n~` 组合都会被 ssh 吃掉两个字节，
+> 对端 CRC 失败 → `rz` 回 ZRPOS 并停读 → 我们看到的“对端不读了”。
+> 380 MiB 里几乎必然出现这种组合；小文件概率极低，所以一直“小文件可以”。
+
+修法：出方向写之前过一遍 `defuse_ssh_escape()`（`mux/src/zmodem/session.rs`）——
+把**紧跟 `~` 的 LF** 以及**帧尾的 LF** 用 ZDLE 转义（`ZDLE, 0x0a ^ 0x40` = `18 4a`）。
+这是协议本身就定义的转义，lrzsz `rz` 会原样还原；不需要转到 ZBIN，也不影响 CRC。
+实测：
+
+| 用例 | 结果 |
+|---|---|
+| 旁路探针，交互 `ssh` + `rz`，1 MiB payload 内植入 `\n~.` | 不转义：连接被 ssh 关闭（`Shared connection ... closed`），对端只收到 491520 B；转义后：**字节一致** |
+| 同上，1 MiB 全 CR/LF 转义（保守方案） | ✅ 一致，说明 lrzsz 接受转义后的 LF |
+| wezterm（v2）经 `ssh` 上传 398,622,992 B（用户那份 380.2 MiB 文件） | ✅ 35 s，两端 `md5` 相同 |
+| wezterm（v2）经 `ssh` 上传 293 KiB / 32 MiB | ✅ `md5` 相同 |
+| 本地 pty + 真 `rz` 400 MiB（第六轮用例） | ✅ 仍一致（帧里没有 `\n~` 时不做任何改写） |
+
+回归测试：`ssh_escape_pairs_never_reach_the_wire`、`defuse_leaves_frames_without_line_breaks_alone`。
+
 ### 待补充
 - [ ] `tmux -CC` 下的实测吞吐（尤其是 `send-keys -H` 的每条命令长度上限）
 - [ ] zenity 在有桌面的真实会话里弹窗（Xvfb 无 WM 环境只验证了"失败后回退"）
@@ -291,3 +374,5 @@ t=161.0s 十次 CAN + 十次 BS，进程退出
 - [ ] Windows / macOS 实机
 - [ ] 断点续传（`resume = true`）只跑过单测与旁路探针，没有在真机上中断过真实的
   `sz` 传输来验证"接着传"的效果
+- [x] 380 MiB 上传经真实 `ssh`（10.95.22.31，远端 OpenSSH 7.4p1 / lrzsz 0.12.20）
+  端到端通过：35 s，`md5` 一致
