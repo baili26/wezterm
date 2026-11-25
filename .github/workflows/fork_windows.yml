@@ -1,0 +1,72 @@
+# Fork-only Windows build.
+#
+# Upstream's gen_windows_*.yml build on any repo, but their release jobs are
+# gated with `if: github.repository == 'wezterm/wezterm'`, so on this fork they
+# produce nothing.  This workflow is a new file (never a gen_*.yml, which the
+# upstream generator deletes) so it survives `scripts/sync-upstream.sh`.
+#
+# Push a tag to publish:
+#
+#   git tag fork-v20261125 && git push origin fork-v20261125
+#
+# A zip of the four binaries plus the bundled DLLs lands in that tag's
+# (pre-)release.  No installer: building one needs Inno Setup, which the
+# runner image does not reliably ship.
+
+name: fork_windows
+
+on:
+  push:
+    tags:
+      - "fork-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: "windows-2025"
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: "checkout repo"
+        uses: actions/checkout@v5
+        with:
+          submodules: "recursive"
+      - name: "Install Rust"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: "x86_64-pc-windows-msvc"
+      - name: "Build (Release mode)"
+        shell: cmd
+        run: |
+          PATH C:\Strawberry\perl\bin;%PATH%
+          cargo build --release -p wezterm -p wezterm-gui -p wezterm-mux-server -p strip-ansi-escapes
+      - name: "Package"
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $dir = "WezTerm-windows-$tag"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          foreach ($i in @(
+            "wezterm.exe", "wezterm-gui.exe", "wezterm-mux-server.exe", "strip-ansi-escapes.exe",
+            "conpty.dll", "OpenConsole.exe", "libEGL.dll", "libGLESv2.dll"
+          )) {
+            Copy-Item "target/release/$i" $dir
+          }
+          New-Item -ItemType Directory -Path "$dir/mesa" | Out-Null
+          Copy-Item "target/release/mesa/opengl32.dll" "$dir/mesa"
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          $hash = (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $dir.zip" | Set-Content "$dir.zip.sha256"
+      - name: "Upload to release"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --prerelease --title "$GITHUB_REF_NAME" \
+              --notes "Personal fork build of $GITHUB_REF_NAME."
+          bash ci/retry.sh gh release upload --clobber "$GITHUB_REF_NAME" \
+            WezTerm-windows-*.zip WezTerm-windows-*.zip.sha256
