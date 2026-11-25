@@ -205,6 +205,17 @@ end)
 **结论：纯 Lua 轮询只适合"少量 pane + 低频率 + 简单子串匹配"。**
 想做到"每个 pane 每 200ms 检查复杂正则"，应该改代码（下一节）。
 
+> **2026-11-20 补记（同一台机器，release 构建，15 秒 idle）**：
+> 空配置 506 jiffies vs 挂载关键词轮询 523 jiffies，**差异在噪声内**，没有复现
+> 本节测到的"翻倍"。差别在于本节测法是「每 tick 把整个 viewport 拉进 Lua」，
+> 而那次用的是「记住 `get_cursor_position().y`、只读新增行」。
+> 另外本节推荐的 `get_lines_as_text` 在折行时会漏判（按物理行拼接），
+> 需要 `get_text_from_region`（会拼回逻辑行）。
+> **但这条路在 tmux 里是死的**：全屏程序（tmux/vim/less）用光标定位重绘，
+> `cursor_y` 根本不随输出推进（实测 `kubectl -w` 狂刷时恒定不变），
+> 增量永远为 0。要覆盖 tmux 就必须换输入源（`pipe-pane` 拿应用级字节流）
+> 或改 Rust 挂 `MuxNotification::PaneOutput` + `get_changed_since`。
+
 ### 3.4 零轮询的边沿：`bell`（实测可用）
 
 ```lua

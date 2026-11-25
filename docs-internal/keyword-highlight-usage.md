@@ -124,10 +124,30 @@ config.keyword_rules = {
 
 **k8s 对象名 / 命名空间**
 
+Pod 名的随机后缀由 k8s 的 `util/rand.SafeEncodeString` 生成，字母表固定为
+`bcdfghjklmnpqrstvwxz2456789`（**没有元音**，也剔除了 `l`/`o`/`u`/`y`）。
+用这个字符集做判据，才能把真 pod 名和 `ibm-spectrum-scale` 这类产品名区分开：
+后者 `spectrum`(8 位) + `scale`(5 位) 的形状与 ReplicaSet 哈希 + 随机后缀完全一样。
+
 ```lua
-{ regex = '\\b[a-z0-9-]+-[a-z0-9]{5}-[a-z0-9]{5}\\b', fg = '#87d7ff' },  -- pod 后缀
+-- 后缀 5~10 位，只含「辅音+数字」且至少一个辅音；英文词天然不匹配
+local C = 'bcdfghjklmnpqrstvwxz'
+local parts = {}
+for pos = 0, 5 do                       -- 首个辅音出现在第 pos 位
+  local lo, hi = math.max(0, 4 - pos), 9 - pos
+  if hi >= lo then
+    parts[#parts + 1] = (pos == 0 and '' or ('[%s0-9]{%d}'):format(C, pos))
+      .. '[' .. C .. ']' .. ('[%s0-9]{%d,%d}'):format(C, lo, hi)
+  end
+end
+local POD = '\\b[a-z0-9]+(?:-[a-z0-9]+)*-(?:' .. table.concat(parts, '|') .. ')\\b'
+
+{ regex = POD, fg = '#87d7ff' },                      -- pod 名
 { regex = '\\b(namespace|ns)[=: ]+[a-z0-9-]+', fg = '#d7af87' },
 ```
+
+> 别用 `[a-z0-9]{8,10}-[a-z0-9]{5}` 这种「形状匹配」：它漏掉
+> `kube-proxy-9v556` / `pod-2r3shd8`（没有哈希段），又误报 `ibm-spectrum-scale`。
 
 **AI 训练任务：loss / step / OOM**
 
