@@ -10,6 +10,10 @@
 //! (A single `UnixStream::pair` cannot be used: it is bidirectional, so each
 //! side would read back its own writes.  We need one socket per direction.)
 
+// The transport under test is a pair of Unix sockets, which Windows lacks.
+// Compiled out there so `cargo test` on Windows still builds.
+#![cfg(unix)]
+
 use mux::zmodem::detector::Mode;
 use mux::zmodem::sink;
 use std::io::{Read, Write};
